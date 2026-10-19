@@ -1,0 +1,74 @@
+# SwiftShot
+
+A CleanShot X–lite screenshot utility for macOS. Menubar agent app (no Dock icon),
+built with AppKit + SwiftUI, ScreenCaptureKit, CoreGraphics and Carbon hotkeys.
+No third-party dependencies.
+
+## Features
+
+- **Capture Region** — fullscreen dimmed overlay across all displays; drag a
+  rubber-band selection, click inside it or press **⏎** to confirm, **⎋** to cancel.
+- **Capture Fullscreen** — captures every connected display as one image.
+- **Editor** — annotate before saving:
+  - Pen (freehand), Arrow, Rectangle, Ellipse, translucent Highlight,
+    Mosaic (pixelate region), Text (click to place, type, Enter/click to commit).
+  - 7 preset colors, stroke-width slider, Undo (⌘Z), Cancel (⎋).
+  - **Copy** → PNG + TIFF on the clipboard. **Save…** → NSSavePanel, PNG/JPEG.
+- **Floating preview** — after Copy/Save a thumbnail panel pins to the
+  bottom-right corner; click to reopen the editor, × to dismiss,
+  auto-fades after ~10 s (hover restores).
+- **Hide Desktop Icons** — toggles `com.apple.finder CreateDesktop` and
+  restarts Finder; menu item shows a checkmark while hidden.
+- **Open Save Folder** / **Preferences…** (choose save folder) / **Quit**.
+
+## Hotkeys
+
+| Shortcut | Action |
+|---|---|
+| **⌃⇧4** | Capture Region |
+| **⌃⇧3** | Capture Fullscreen |
+
+Registered globally via Carbon `RegisterEventHotKey` — no Accessibility
+permission needed.
+
+## Build & Run
+
+```sh
+make            # builds Build/SwiftShot.app
+make run        # build + open
+make clean
+```
+
+Requires Xcode 27+ toolchain, arm64, deployment target macOS 14.
+
+### Headless self-test
+
+```sh
+./Build/SwiftShot.app/Contents/MacOS/SwiftShot --selftest
+```
+
+Captures all screens, composites a union crop, renders every annotation type
+(rect, arrow, highlight, mosaic, text) and writes the result to
+`/tmp/swiftshot-selftest.png`. Useful for verifying the capture + render
+pipeline without UI.
+
+
+## Permissions
+
+**Screen Recording** is required for capture. On the first capture attempt
+macOS must grant permission; SwiftShot preflights with
+`CGPreflightScreenCaptureAccess()` and shows an alert with a button that opens
+*System Settings → Privacy & Security → Screen Recording*. Enable SwiftShot
+there (quit & relaunch if prompted).
+
+## Default save location
+
+`~/Pictures/SwiftShot`, filenames like `SwiftShot 2026-10-16 at 14.30.00.png`.
+Changeable in Preferences.
+
+## Notes / limitations
+
+- Region selection commits on click-inside or Enter (CleanShot-style
+  "click to confirm" after dragging).
+- Launch-at-login is not bundled; enable via System Settings → Login Items.
+- No screen recording/GIF, scrolling capture, OCR, or cloud upload.

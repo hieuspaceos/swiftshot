@@ -1,0 +1,254 @@
+import Cocoa
+
+/// Fullscreen borderless overlay covering every connected display.
+/// Draws the captured screen dimmed; user rubber-bands a region.
+/// ESC cancels; a plain click cancels; drag-release commits immediately
+/// (in NSScreen bottom-left coords).
+final class CaptureOverlayWindow: NSWindow {
+
+    var onCommit: ((CGRect) -> Void)?
+    var onCancel: (() -> Void)?
+
+    private let overlayView = OverlayContentView()
+    private var finished = false
+
+    init(shots: [ScreenShot]) {
+        let union = shots.reduce(CGRect.null) { $0.union($1.frame) }
+        let frame = union.isNull ? (NSScreen.main?.frame ?? .zero) : union
+        overlayView.shots = shots
+        overlayView.unionOrigin = frame.origin
+        super.init(contentRect: frame,
+                   styleMask: [.borderless, .nonactivatingPanel],
+                   backing: .buffered,
+                   defer: false)
+        self.level = .screenSaver
+        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        self.isOpaque = false
+        self.backgroundColor = .clear
+        self.hasShadow = false
+        self.ignoresMouseEvents = false
+        self.acceptsMouseMovedEvents = true
+        overlayView.addTrackingArea(NSTrackingArea(rect: .zero,
+            options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: overlayView))
+        overlayView.frame = NSRect(origin: .zero, size: frame.size)
+        overlayView.onCommit = { [weak self] r in self?.commit(r) }
+        overlayView.onCancel = { [weak self] in self?.cancel() }
+        self.contentView = overlayView
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    func present() {
+        NSApp.activate(ignoringOtherApps: true)
+        makeKeyAndOrderFront(nil)
+        makeFirstResponder(overlayView)
+        NSCursor.crosshair.set()
+    }
+
+    private func commit(_ rect: CGRect) {
+        guard !finished else { return }
+        finished = true
+        orderOut(nil)
+        onCommit?(rect)
+    }
+
+    private func cancel() {
+        guard !finished else { return }
+        finished = true
+        orderOut(nil)
+        onCancel?()
+    }
+}
+
+final class OverlayContentView: NSView {
+
+    var shots: [ScreenShot] = []
+    var unionOrigin: CGPoint = .zero
+    var onCommit: ((CGRect) -> Void)?
+    var onCancel: (() -> Void)?
+
+    private var dragStart: CGPoint?   // view coords (bottom-left)
+    private var dragCurrent: CGPoint?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .crosshair)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        // Flip to top-left space for image drawing.
+        ctx.translateBy(x: 0, y: bounds.height)
+        ctx.scaleBy(x: 1, y: -1)
+        for shot in shots {
+            let r = viewRect(forScreenFrame: shot.frame)
+            drawImageUpright(shot.image, in: r, ctx: ctx)
+        }
+
+        // Selection rect in the flipped (top-left) space.
+        let selBL = currentDragRect()
+        let sel: CGRect? = selBL.map {
+            CGRect(x: $0.minX, y: bounds.height - $0.maxY,
+                   width: $0.width, height: $0.height)
+        }
+
+
+        // Dim the whole thing.
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.45).cgColor)
+        ctx.fill(bounds)
+
+        if let sel, sel.width > 1, sel.height > 1 {
+            // Punch an undimmed hole by re-drawing underlying pixels.
+            ctx.saveGState()
+            ctx.clip(to: sel)
+            for shot in shots {
+                drawImageUpright(shot.image, in: viewRect(forScreenFrame: shot.frame), ctx: ctx)
+            }
+            ctx.restoreGState()
+
+            ctx.setStrokeColor(NSColor.white.cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.stroke(sel.insetBy(dx: 0.5, dy: 0.5))
+
+            // `sel` is top-left space; the pill goes just above the selection.
+            let label = "\(Int(sel.width)) × \(Int(sel.height))"
+            drawPill(label as NSString, nearTopLeft: sel, ctx: ctx)
+        } else {
+            // No selection yet: crosshair guides + position + hint banner.
+            let mBL = mouseViewLocation()
+            let m = CGPoint(x: mBL.x, y: bounds.height - mBL.y) // top-left space
+            ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.45).cgColor)
+            ctx.setLineWidth(0.5)
+            ctx.setLineDash(phase: 0, lengths: [4, 4])
+            ctx.move(to: CGPoint(x: 0, y: m.y)); ctx.addLine(to: CGPoint(x: bounds.width, y: m.y))
+            ctx.move(to: CGPoint(x: m.x, y: 0)); ctx.addLine(to: CGPoint(x: m.x, y: bounds.height))
+            ctx.strokePath()
+            ctx.setLineDash(phase: 0, lengths: [])
+
+            let pos = "\(Int(m.x)) , \(Int(m.y))"
+            drawPill(pos as NSString,
+                     atTopLeft: CGPoint(x: min(m.x + 14, bounds.width - 90),
+                                        y: min(m.y + 14, bounds.height - 30)),
+                     ctx: ctx)
+
+            drawPill("Drag to select a region · ESC to cancel" as NSString,
+                     atTopLeft: CGPoint(x: (bounds.width - 300) / 2, y: 40),
+                     ctx: ctx, fixedSize: CGSize(width: 300, height: 30), centered: true)
+        }
+    }
+
+    /// Mouse position in view coords (bottom-left origin).
+    private func mouseViewLocation() -> CGPoint {
+        convert(window?.mouseLocationOutsideOfEventStream ?? .zero, from: nil)
+    }
+
+    /// Dark rounded label drawn in the flipped (top-left) coordinate space.
+    /// `nearTopLeft` places the pill just above the rect, or below when `below`.
+    private func drawPill(_ label: NSString, nearTopLeft sel: CGRect? = nil,
+                          atTopLeft point: CGPoint = .zero, ctx: CGContext,
+                          below: Bool = false, fixedSize: CGSize = .zero,
+                          centered: Bool = false) {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: NSColor.white
+        ]
+        let ts = label.size(withAttributes: attrs)
+        let pad: CGFloat = 6
+        let size = fixedSize == .zero ? CGSize(width: ts.width + pad * 2, height: ts.height + pad)
+                                      : fixedSize
+        var lx: CGFloat; var ly: CGFloat
+        if let sel {
+            lx = min(max(sel.minX, 4), bounds.width - size.width - 4)
+            ly = below ? sel.maxY + 8 : sel.minY - size.height - 8
+            if ly < 4 { ly = sel.maxY + 8 }
+        } else {
+            lx = point.x; ly = point.y
+        }
+        let rect = CGRect(x: lx, y: ly, width: size.width, height: size.height)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.75).cgColor)
+        ctx.addPath(CGPath(roundedRect: rect, cornerWidth: 5, cornerHeight: 5, transform: nil))
+        ctx.fillPath()
+        ctx.saveGState()
+        let tx = centered ? lx + (size.width - ts.width) / 2 : lx + pad
+        ctx.translateBy(x: tx, y: ly + (size.height + ts.height) / 2 - 4)
+        ctx.scaleBy(x: 1, y: -1)
+        label.draw(at: .zero, withAttributes: attrs)
+        ctx.restoreGState()
+    }
+
+
+
+    /// Coalesce redraw requests to ~1 per frame instead of one per event.
+    private var redrawPending = false
+    private func scheduleRedraw() {
+        guard !redrawPending else { return }
+        redrawPending = true
+        DispatchQueue.main.async { [weak self] in
+            self?.redrawPending = false
+            self?.needsDisplay = true
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        scheduleRedraw()
+    }
+
+    private func currentDragRect() -> CGRect? {
+        guard let s = dragStart, let c = dragCurrent else { return nil }
+        return CGRect(x: min(s.x, c.x), y: min(s.y, c.y),
+                      width: abs(c.x - s.x), height: abs(c.y - s.y))
+    }
+    /// Convert a global screen frame (bottom-left origin) into the flipped
+    /// top-left coordinate space used inside draw(_:).
+    private func viewRect(forScreenFrame f: CGRect) -> CGRect {
+        CGRect(x: f.minX - unionOrigin.x,
+               y: bounds.height - (f.maxY - unionOrigin.y),
+               width: f.width, height: f.height)
+    }
+
+    // MARK: - Mouse
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        dragStart = p
+        dragCurrent = p
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        dragCurrent = convert(event.locationInWindow, from: nil)
+        scheduleRedraw()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        dragCurrent = p
+        let sel = currentDragRect()
+        dragStart = nil
+        dragCurrent = nil
+        needsDisplay = true
+        if let sel, sel.width >= 4, sel.height >= 4 {
+            finish(sel)
+        } else {
+            // Plain click with no drag cancels.
+            onCancel?()
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { // ESC
+            onCancel?()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    private func finish(_ viewRect: CGRect) {
+        let global = CGRect(x: viewRect.minX + unionOrigin.x,
+                            y: viewRect.minY + unionOrigin.y,
+                            width: viewRect.width, height: viewRect.height)
+        onCommit?(global)
+    }
+}

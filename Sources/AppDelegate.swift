@@ -1,0 +1,254 @@
+import Cocoa
+import Carbon
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+
+    private var statusItem: NSStatusItem!
+    private var overlay: CaptureOverlayWindow?
+    private var editors: [EditorWindow] = []
+    private var previews: [FloatingPreviewPanel] = []
+    private var preferencesWindow: PreferencesWindow?
+
+    // Carbon hotkey IDs
+    private let kRegionHotkeyID: UInt32 = 1
+    private let kFullscreenHotkeyID: UInt32 = 2
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        setupStatusItem()
+        registerHotkeys()
+    }
+
+    // MARK: - Status item & menu
+
+    private func setupStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = statusItem.button {
+            button.image = NSImage(systemSymbolName: "camera.viewfinder",
+                                   accessibilityDescription: "SwiftShot")
+        }
+        rebuildMenu()
+    }
+
+    private func rebuildMenu() {
+        let menu = NSMenu()
+
+        let region = NSMenuItem(title: "Capture Region",
+                                action: #selector(captureRegionMenu),
+                                keyEquivalent: "4")
+        region.target = self
+        region.keyEquivalentModifierMask = [.option, .shift]
+        menu.addItem(region)
+
+        let full = NSMenuItem(title: "Capture Fullscreen",
+                              action: #selector(captureFullscreenMenu),
+                              keyEquivalent: "3")
+        full.target = self
+        full.keyEquivalentModifierMask = [.option, .shift]
+        menu.addItem(full)
+
+        menu.addItem(.separator())
+
+        let hide = NSMenuItem(title: "Hide Desktop Icons",
+                              action: #selector(toggleDesktopIcons),
+                              keyEquivalent: "")
+        hide.target = self
+        hide.state = Self.desktopIconsHidden() ? .on : .off
+        menu.addItem(hide)
+
+        let open = NSMenuItem(title: "Open Save Folder",
+                              action: #selector(openSaveFolder),
+                              keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+
+        let prefs = NSMenuItem(title: "Preferences…",
+                               action: #selector(showPreferences),
+                               keyEquivalent: ",")
+        prefs.target = self
+        menu.addItem(prefs)
+
+        menu.addItem(.separator())
+
+        let quit = NSMenuItem(title: "Quit SwiftShot",
+                              action: #selector(quitApp),
+                              keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+
+        statusItem.menu = menu
+    }
+
+    // MARK: - Hotkeys  (⌥⇧4 region, ⌥⇧3 fullscreen — avoids macOS ⇧⌘/⌃⇧⌘ screenshot shortcuts)
+
+    private func registerHotkeys() {
+        let mods = UInt32(optionKey | shiftKey)
+        HotkeyManager.shared.register(id: kRegionHotkeyID,
+                                      keyCode: UInt32(kVK_ANSI_4),
+                                      modifiers: mods) { [weak self] in
+            NSLog("SwiftShot: T0 hotkey REGION fired")
+            self?.captureRegion()
+        }
+        HotkeyManager.shared.register(id: kFullscreenHotkeyID,
+                                      keyCode: UInt32(kVK_ANSI_3),
+                                      modifiers: mods) { [weak self] in
+            NSLog("SwiftShot: hotkey FULLSCREEN pressed")
+            self?.captureFullscreen()
+        }
+    }
+
+    // MARK: - Menu actions
+
+    @objc private func captureRegionMenu() { captureRegion() }
+    @objc private func captureFullscreenMenu() { captureFullscreen() }
+    @objc private func quitApp() { NSApp.terminate(nil) }
+
+    @objc private func toggleDesktopIcons() {
+        let hidden = !Self.desktopIconsHidden()
+        setDesktopIconsHidden(hidden)
+        rebuildMenu()
+    }
+
+    @objc private func openSaveFolder() {
+        let dir = defaultSaveDirectory()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
+    }
+
+    @objc private func showPreferences() {
+        if preferencesWindow == nil {
+            preferencesWindow = PreferencesWindow()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        preferencesWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: - Hide desktop icons
+
+    private static func desktopIconsHidden() -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        p.arguments = ["read", "com.apple.finder", "CreateDesktop"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            p.waitUntilExit()
+            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(),
+                             encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return out == "0" || out?.lowercased() == "false"
+        } catch {
+            return false
+        }
+    }
+
+    private func setDesktopIconsHidden(_ hidden: Bool) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        p.arguments = ["write", "com.apple.finder", "CreateDesktop", "-bool", hidden ? "false" : "true"]
+        try? p.run()
+        p.waitUntilExit()
+
+        let k = Process()
+        k.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        k.arguments = ["Finder"]
+        try? k.run()
+    }
+
+    func captureRegion() {
+        guard ScreenCapturer.checkPermissionOrAlert() else { return }
+        Task { [weak self] in
+            do {
+                let shots = try await ScreenCapturer.captureAllScreens()
+                await MainActor.run { [weak self] in self?.showOverlay(shots: shots) }
+            } catch {
+                await MainActor.run { [weak self] in self?.handleCaptureError(error) }
+            }
+        }
+    }
+
+    func captureFullscreen() {
+        guard ScreenCapturer.checkPermissionOrAlert() else { return }
+        Task { [weak self] in
+            do {
+                let shots = try await ScreenCapturer.captureAllScreens()
+                await MainActor.run { [weak self] in self?.finishFullscreen(shots: shots) }
+            } catch {
+                await MainActor.run { [weak self] in self?.handleCaptureError(error) }
+            }
+        }
+    }
+
+    private func showOverlay(shots: [ScreenShot]) {
+        NSLog("SwiftShot: T1 overlay presenting (\(shots.count) screens)")
+        let overlay = CaptureOverlayWindow(shots: shots)
+        self.overlay = overlay
+        overlay.onCommit = { [weak self] region in
+            guard let self else { return }
+            self.overlay = nil
+            if let (image, scale) = cropRegion(region, from: shots) {
+                self.openEditor(image: image, scale: scale)
+            }
+        }
+        overlay.onCancel = { [weak self] in
+            self?.overlay = nil
+        }
+        overlay.present()
+    }
+
+    private func finishFullscreen(shots: [ScreenShot]) {
+        let union = shots.reduce(CGRect.null) { $0.union($1.frame) }
+        guard !union.isNull,
+              let (image, scale) = cropRegion(union, from: shots) else {
+            handleCaptureError(CaptureError.failed("Could not assemble fullscreen capture"))
+            return
+        }
+        openEditor(image: image, scale: scale)
+    }
+
+    // MARK: - Editor & preview
+
+    private func openEditor(image: CGImage, scale: CGFloat) {
+        NSLog("SwiftShot: T2 editor opening \(image.width)x\(image.height)")
+        // Copy immediately — the raw capture is on the pasteboard even if the
+        // user never touches Copy in the editor.
+        EditorWindow.copyToPasteboard(image)
+        let shot = ScreenShot(image: image, scale: scale, frame: .zero)
+        let editor = EditorWindow(shot: shot)
+        editors.append(editor)
+        editor.onFinish = { [weak self, weak editor] result in
+            guard let self else { return }
+            if let img = result {
+                self.showPreview(image: img, scale: scale)
+            }
+            if let editor {
+                self.editors.removeAll { $0 === editor }
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        editor.makeKeyAndOrderFront(nil)
+    }
+
+    private func showPreview(image: CGImage, scale: CGFloat) {
+        let panel = FloatingPreviewPanel(image: image, scale: scale)
+        previews.append(panel)
+        panel.onReopen = { [weak self] img in
+            self?.openEditor(image: img, scale: scale)
+        }
+        panel.onDismiss = { [weak self, weak panel] in
+            guard let self, let panel else { return }
+            self.previews.removeAll { $0 === panel }
+        }
+        panel.show()
+    }
+
+    private func handleCaptureError(_ error: Error) {
+        if case CaptureError.permissionDenied = error {
+            ScreenCapturer.showPermissionAlert()
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert(error: error)
+        alert.runModal()
+    }
+}
