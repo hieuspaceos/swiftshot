@@ -71,6 +71,13 @@ if CommandLine.arguments.contains("--selftest") {
     exit(0)
 }
 
+// Headless demo recorder: `./SwiftShot --record <outdir>` renders the real
+// capture→annotate pipeline into a PNG frame sequence (no windows opened).
+if let i = CommandLine.arguments.firstIndex(of: "--record"),
+   CommandLine.arguments.count > i + 1 {
+    RecordDemo.run(outdir: CommandLine.arguments[i + 1])
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
