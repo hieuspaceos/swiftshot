@@ -4,6 +4,19 @@ A CleanShot X–lite screenshot utility for macOS. Menubar agent app (no Dock ic
 built with AppKit + SwiftUI, ScreenCaptureKit, CoreGraphics and Carbon hotkeys.
 No third-party dependencies.
 
+## Install
+
+**Homebrew (recommended)**
+
+```sh
+brew tap hieuspaceos/suite && brew trust hieuspaceos/suite
+brew install --cask swiftshot
+```
+
+**Manual** — grab the DMG from
+[Releases](https://github.com/hieuspaceos/swiftshot/releases/latest), drag into
+/Applications, right-click → Open once (ad-hoc signed).
+
 ## Features
 
 - **Capture Region** — fullscreen dimmed overlay across all displays; drag a
