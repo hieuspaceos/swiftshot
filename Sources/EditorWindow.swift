@@ -51,9 +51,17 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
     // MARK: - Toolbar
 
     private func buildToolbar(in contentView: NSView, canvasSize: NSSize) {
-        let toolbar = NSView(frame: NSRect(x: 0, y: contentView.bounds.height - 46,
-                                           width: contentView.bounds.width, height: 46))
-        toolbar.autoresizingMask = [.width, .minYMargin]
+        // Toolbar may be wider than the window — wrap it in a horizontal
+        // NSScrollView so nothing is clipped; user scrolls to reach items.
+        let scrollHost = NSScrollView(frame: NSRect(x: 0, y: contentView.bounds.height - 46,
+                                                    width: contentView.bounds.width, height: 46))
+        scrollHost.autoresizingMask = [.width, .minYMargin]
+        scrollHost.hasHorizontalScroller = true
+        scrollHost.hasVerticalScroller = false
+        scrollHost.autohidesScrollers = true
+        scrollHost.horizontalScrollElasticity = .none
+        scrollHost.drawsBackground = false
+        let toolbar = NSView(frame: NSRect(x: 0, y: 0, width: contentView.bounds.width, height: 46))
 
         var x: CGFloat = 10
 
@@ -121,7 +129,11 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
         toolbar.addSubview(undo)
         x += 58
 
-        contentView.addSubview(toolbar)
+        // Size the document to the real content width; scroll view clips
+        // horizontally when the window is narrower.
+        toolbar.frame.size.width = max(x, contentView.bounds.width)
+        scrollHost.documentView = toolbar
+        contentView.addSubview(scrollHost)
 
         // Canvas inside scroll view below the toolbar.
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0,
