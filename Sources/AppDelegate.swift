@@ -101,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func captureRegionMenu() { captureRegion() }
     @objc private func captureFullscreenMenu() { captureFullscreen() }
     @objc private func openDonate() {
-        NSWorkspace.shared.open(URL(string: "https://ko-fi.com/hieuspaceos")!)
+        NSWorkspace.shared.open(URL(string: "https://github.com/sponsors/hieuspaceos")!)
     }
     @objc private func quitApp() { NSApp.terminate(nil) }
 
