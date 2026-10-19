@@ -26,7 +26,12 @@ brew install --cask swiftshot
   - Pen (freehand), Arrow, Rectangle, Ellipse, translucent Highlight,
     Mosaic (pixelate region), Text (click to place, type, Enter/click to commit).
   - 7 preset colors, stroke-width slider, Undo (⌘Z), Cancel (⎋).
-  - **Copy** → PNG + TIFF on the clipboard. **Save…** → NSSavePanel, PNG/JPEG.
+- **Agent button** — saves the PNG to the save folder, puts image + file
+  URL + path on the clipboard, returns focus to the app that was
+  frontmost at capture time (or a chosen target: Terminal, iTerm2,
+  Ghostty, Warp, VSCode, Cursor — set in Preferences), and synthesizes
+  ⌘V so the shot lands at the prompt. Built for CLI agents
+  (omp/claude/codex): terminals get the file path, editors get the image.
 - **Floating preview** — after Copy/Save a thumbnail panel pins to the
   bottom-right corner; click to reopen the editor, × to dismiss,
   auto-fades after ~10 s (hover restores).
@@ -84,6 +89,11 @@ macOS must grant permission; SwiftShot preflights with
 `CGPreflightScreenCaptureAccess()` and shows an alert with a button that opens
 *System Settings → Privacy & Security → Screen Recording*. Enable SwiftShot
 there (quit & relaunch if prompted).
+
+**Accessibility** is used only by the **Agent** button's auto-⌘V (posting
+the keystroke into your terminal). macOS prompts on first use; without it
+the Agent button still saves the file and fills the clipboard — you paste
+manually.
 
 ## Default save location
 

@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlay: CaptureOverlayWindow?
     private var editors: [EditorWindow] = []
     private var previews: [FloatingPreviewPanel] = []
+    private var pill: AgentPill?
     private var preferencesWindow: PreferencesWindow?
 
     // Carbon hotkey IDs
@@ -160,6 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func captureRegion() {
         guard ScreenCapturer.checkPermissionOrAlert() else { return }
+        AgentPaste.rememberFrontmostApp()
         let screens = NSScreen.screens
         // Lazy per-screen capture: only the display under the cursor is
         // captured before the overlay appears; the rest arrive via
@@ -188,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func captureFullscreen() {
         guard ScreenCapturer.checkPermissionOrAlert() else { return }
+        AgentPaste.rememberFrontmostApp()
         Task { [weak self] in
             do {
                 let shots = try await ScreenCapturer.captureAllScreens()
@@ -225,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlay.onCommit = { [weak self, weak overlay] region in
             guard let self, let overlay else { return }
             if let (image, scale) = cropRegion(region, from: overlay.currentShots) {
-                self.openEditor(image: image, scale: scale)
+                self.openPill(image: image, scale: scale)
             }
         }
         overlay.onCancel = {} // shared window stays alive (hidden) for reuse
@@ -239,7 +242,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             handleCaptureError(CaptureError.failed("Could not assemble fullscreen capture"))
             return
         }
-        openEditor(image: image, scale: scale)
+        openPill(image: image, scale: scale)
+    }
+
+    // MARK: - Pill & editor
+
+    /// The post-capture surface: a floating pill with a prompt field.
+    /// ⏎ annotates (Vision OCR → ellipse around matching text) and
+    /// delivers shot+prompt to the agent target; ✏️ opens the classic
+    /// editor for manual annotation.
+    private func openPill(image: CGImage, scale: CGFloat) {
+        pill?.close() // dismiss a leftover pill from an earlier capture
+        NSLog("SwiftShot: T2 pill opening \(image.width)x\(image.height)")
+        for panel in previews { panel.dismiss() }
+        EditorWindow.copyToPasteboard(image)
+        let newPill = AgentPill(image: image, scale: scale)
+        self.pill = newPill
+        newPill.onCommit = { [weak self] out, prompt in
+            self?.deliverCapture(image: out, prompt: prompt, scale: scale)
+        }
+        newPill.onEdit = { [weak self] raw in
+            self?.openEditor(image: raw, scale: scale)
+        }
+        newPill.present()
+    }
+
+    /// Pill commit path: persist PNG, load the pasteboard with all
+    /// representations, then focus the agent target and ⌘V. With a
+    /// prompt we deliver `prompt + path` as the string so the agent sees
+    /// the instruction and the image reference in one paste.
+    private func deliverCapture(image: CGImage, prompt: String?, scale: CGFloat) {
+        let dir = defaultSaveDirectory()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(defaultFileName(ext: "png"))
+        let rep = NSBitmapImageRep(cgImage: image)
+        if let data = rep.representation(using: .png, properties: [:]) {
+            try? data.write(to: url)
+        }
+        EditorWindow.copyForAgent(image: image, fileURL: url)
+        AgentPaste.paste(prompt: prompt)
+        showPreview(image: image, scale: scale)
     }
 
     // MARK: - Editor & preview

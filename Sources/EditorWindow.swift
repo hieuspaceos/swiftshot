@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 /// Editor window: annotation canvas in a scroll view plus a toolbar.
 /// All shape coordinates are in canvas points (top-left origin),
 /// where canvas point size = pixelSize / shot.scale.
-final class EditorWindow: NSWindow, NSWindowDelegate {
+final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
 
     let shot: ScreenShot
     /// Called on Copy/Save (with rendered image) and on Cancel (nil).
@@ -14,6 +14,11 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
     private var toolButtons: [NSButton] = []
     private var colorButtons: [NSButton] = []
     private var finished = false
+    /// Row-1 extras: inline prompt field + Annotate toggle; row-2 views
+    /// are hidden until the toggle is on.
+    private let promptField = NSTextField()
+    private let annotateToggle = NSButton()
+    private var annotateRowViews: [NSView] = []
 
     static let palette: [NSColor] = [
         .systemRed, .systemYellow, .systemGreen, .systemBlue,
@@ -27,19 +32,25 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
         canvasView = EditorCanvasView(shot: shot)
 
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let toolbarH: CGFloat = 46
+        let toolbarH: CGFloat = 80
         let maxW = screen.width - 60, maxH = screen.height - toolbarH - 60
         let winW = min(max(canvasSize.width + 2, 720), maxW)
         let winH = min(canvasSize.height + 2 + toolbarH, maxH + toolbarH)
         let origin = NSPoint(x: screen.midX - winW / 2, y: screen.midY - winH / 2)
 
+        // Borderless floating panel — the editor should feel like the
+        // capture HUD (Screenshot.app / Shottr), not a document window.
         super.init(contentRect: NSRect(origin: origin, size: NSSize(width: winW, height: winH)),
-                   styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                   styleMask: [.borderless, .resizable],
                    backing: .buffered,
                    defer: false)
-        self.title = "SwiftShot — \(Int(canvasSize.width))×\(Int(canvasSize.height))"
+        self.isOpaque = false
+        self.backgroundColor = .clear
+        self.hasShadow = true
+        self.level = .floating
         self.minSize = NSSize(width: 480, height: 320)
         self.isReleasedWhenClosed = false
+        self.isMovableByWindowBackground = true
         self.delegate = self
 
         buildToolbar(in: self.contentView!, canvasSize: canvasSize)
@@ -48,55 +59,118 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
         canvasView.needsDisplay = true
     }
 
+    /// Compact icon button for the HUD toolbar.
+    private func iconButton(_ symbol: String, tip: String, action: Selector,
+                            frame: NSRect) -> NSButton {
+        let b = NSButton(frame: frame)
+        b.bezelStyle = .regularSquare
+        b.isBordered = false
+        b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
+        b.imagePosition = .imageOnly
+        b.contentTintColor = .white
+        b.toolTip = tip
+        b.target = self
+        b.action = action
+        return b
+    }
+
+    // Borderless panels can't become key by default — without this the
+    // prompt field never receives keyboard focus.
+    override var canBecomeKey: Bool { true }
+
     // MARK: - Toolbar
 
     private func buildToolbar(in contentView: NSView, canvasSize: NSSize) {
-        // Toolbar may be wider than the window — wrap it in a horizontal
-        // NSScrollView so nothing is clipped; user scrolls to reach items.
-        let scrollHost = NSScrollView(frame: NSRect(x: 0, y: contentView.bounds.height - 46,
-                                                    width: contentView.bounds.width, height: 46))
+        // Two-row toolbar:
+        //   Row 1 (always):  Copy  Save  Agent  Share  [prompt field]  Annotate  Cancel
+        //   Row 2 (Annotate toggled on): drawing tools + colors + width + Undo
+        // Agent-era default: the screenshot's destination is a
+        // conversation, not an annotation canvas — drawing tools stay
+        // hidden until asked for.
+        let scrollHost = NSScrollView(frame: NSRect(x: 0, y: contentView.bounds.height - 80,
+                                                    width: contentView.bounds.width, height: 80))
         scrollHost.autoresizingMask = [.width, .minYMargin]
         scrollHost.hasHorizontalScroller = true
         scrollHost.hasVerticalScroller = false
         scrollHost.autohidesScrollers = true
         scrollHost.horizontalScrollElasticity = .none
         scrollHost.drawsBackground = false
-        let toolbar = NSView(frame: NSRect(x: 0, y: 0, width: contentView.bounds.width, height: 46))
+        let toolbar = NSView(frame: NSRect(x: 0, y: 0, width: contentView.bounds.width, height: 80))
+        // Solid capsule: hudWindow vibrancy washed out over dark
+        // captures, so use a dark rounded fill with a faint border.
+        let capsule = NSView(frame: NSRect(x: 8, y: 38,
+                                           width: contentView.bounds.width - 16, height: 36))
+        capsule.autoresizingMask = [.width]
+        capsule.wantsLayer = true
+        capsule.layer?.cornerRadius = 18
+        capsule.layer?.backgroundColor = NSColor(white: 0.16, alpha: 0.95).cgColor
+        capsule.layer?.borderWidth = 0.5
+        capsule.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
+        toolbar.addSubview(capsule)
 
-        var x: CGFloat = 10
+        var x: CGFloat = 20
+        let topY: CGFloat = 42 // icon row inside the capsule
 
-        // Action buttons first, at the left edge — always visible even
-        // when the capture is narrower than the rest of the toolbar.
-        for (title, action) in [("Copy", #selector(copyClicked)),
-                                ("Save…", #selector(saveClicked)),
-                                ("Cancel", #selector(cancelClicked))] as [(String, Selector)] {
-            let b = NSButton(title: title, target: self, action: action)
-            b.bezelStyle = .rounded
-            b.frame = NSRect(x: x, y: 8, width: 66, height: 30)
-            b.autoresizingMask = [.maxYMargin]
+        // — Row 1: icon actions —
+        let specs: [(String, String, Selector)] = [
+            ("doc.on.doc", "Copy", #selector(copyClicked)),
+            ("square.and.arrow.down", "Save…", #selector(saveClicked)),
+            ("paperplane.fill", "Send to agent (⌥-click: choose app)", #selector(agentClicked)),
+            ("square.and.arrow.up", "Share…", #selector(shareClicked)),
+            ("xmark", "Cancel", #selector(cancelClicked)),
+        ]
+        for (symbol, tip, sel) in specs {
+            let b = iconButton(symbol, tip: tip, action: sel,
+                               frame: NSRect(x: x, y: topY - 2, width: 36, height: 28))
+            if symbol == "paperplane.fill" {
+                b.sendAction(on: [.leftMouseDown, .rightMouseDown])
+            }
             toolbar.addSubview(b)
-            x += 72
+            x += 40
         }
-        x += 10
+
+        // Inline prompt pill: type here, ⏎ = Agent (annotate + send).
+        promptField.frame = NSRect(x: x + 6, y: topY, width: 240, height: 26)
+        promptField.placeholderString = "Ask about this shot…  ⏎ sends"
+        promptField.bezelStyle = .roundedBezel
+        promptField.font = .systemFont(ofSize: 12)
+        promptField.delegate = self
+        toolbar.addSubview(promptField)
+        x += 252
+
+        // Annotate toggle reveals row 2.
+        annotateToggle.setButtonType(.onOff)
+        annotateToggle.title = " Annotate"
+        annotateToggle.image = NSImage(systemSymbolName: "pencil.tip.crop.circle",
+                                       accessibilityDescription: "Annotate")
+        annotateToggle.imagePosition = .imageLeading
+        annotateToggle.bezelStyle = .rounded
+        annotateToggle.controlSize = .small
+        annotateToggle.target = self
+        annotateToggle.action = #selector(annotateToggled(_:))
+        annotateToggle.frame = NSRect(x: x + 4, y: topY, width: 98, height: 26)
+        toolbar.addSubview(annotateToggle)
+        x += 108
+
+        // — Row 2: drawing tools, hidden until Annotate is on —
+        var tx: CGFloat = 10
+        let botY: CGFloat = 6
 
         for tool in EditorTool.allCases {
-            let b = NSButton(title: tool.title, target: self, action: #selector(toolClicked(_:)))
-            b.setButtonType(.onOff)
-            b.bezelStyle = .rounded
-            b.controlSize = .small
-            b.font = NSFont.systemFont(ofSize: 11)
+            let b = iconButton(tool.symbol, tip: tool.title,
+                               action: #selector(toolClicked(_:)),
+                               frame: NSRect(x: tx, y: botY, width: 34, height: 28))
             b.tag = tool.rawValue
-            b.frame = NSRect(x: x, y: 8, width: 58, height: 30)
-            b.autoresizingMask = [.maxYMargin]
+            // Momentary icon button; selected state is driven manually
+            // in toolClicked so taps always fire the action.
             toolbar.addSubview(b)
             toolButtons.append(b)
-            x += 62
+            tx += 38
         }
-        toolButtons[0].state = .on // Pen default
 
-        x += 12
+        tx += 8
         for color in EditorWindow.palette {
-            let b = NSButton(frame: NSRect(x: x, y: 14, width: 20, height: 20))
+            let b = NSButton(frame: NSRect(x: tx, y: botY + 4, width: 20, height: 20))
             b.wantsLayer = true
             b.layer?.backgroundColor = color.cgColor
             b.layer?.cornerRadius = 10
@@ -109,36 +183,37 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
             b.identifier = NSUserInterfaceItemIdentifier("\(EditorWindow.palette.firstIndex(of: color)!)")
             toolbar.addSubview(b)
             colorButtons.append(b)
-            x += 26
+            tx += 26
         }
         updateColorSelection()
 
-        x += 10
+        tx += 8
         let slider = NSSlider(value: 3, minValue: 1, maxValue: 14,
                               target: self, action: #selector(widthChanged(_:)))
-        slider.frame = NSRect(x: x, y: 13, width: 90, height: 20)
-        slider.autoresizingMask = [.maxYMargin]
+        slider.frame = NSRect(x: tx, y: botY + 4, width: 90, height: 20)
         toolbar.addSubview(slider)
-        x += 102
+        tx += 98
 
         let undo = NSButton(title: "Undo", target: self, action: #selector(undoClicked))
         undo.bezelStyle = .rounded
         undo.controlSize = .small
-        undo.frame = NSRect(x: x, y: 8, width: 50, height: 30)
-        undo.autoresizingMask = [.maxYMargin]
+        undo.frame = NSRect(x: tx, y: botY, width: 50, height: 28)
         toolbar.addSubview(undo)
-        x += 58
+        tx += 58
 
-        // Size the document to the real content width; scroll view clips
-        // horizontally when the window is narrower.
-        toolbar.frame.size.width = max(x, contentView.bounds.width)
+        // Hide row 2 until Annotate is toggled.
+        let row2 = toolButtons + colorButtons + [slider, undo]
+        annotateRowViews = row2
+        row2.forEach { $0.isHidden = true }
+
+        toolbar.frame.size.width = max(max(x, tx), contentView.bounds.width)
         scrollHost.documentView = toolbar
         contentView.addSubview(scrollHost)
 
         // Canvas inside scroll view below the toolbar.
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0,
                                                 width: contentView.bounds.width,
-                                                height: contentView.bounds.height - 46))
+                                                height: contentView.bounds.height - 80))
         scroll.autoresizingMask = [.width, .height]
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
@@ -164,6 +239,10 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
     @objc private func toolClicked(_ sender: NSButton) {
         canvasView.currentTool = EditorTool(rawValue: sender.tag) ?? .pen
         for b in toolButtons { b.state = (b == sender) ? .on : .off }
+        // Picking a tool implies intent to draw — reveal the row and
+        // make Annotate reflect it.
+        if annotateToggle.state != .on { annotateToggle.state = .on }
+        annotateRowViews.forEach { $0.isHidden = false }
     }
 
     @objc private func colorClicked(_ sender: NSButton) {
@@ -190,6 +269,118 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
         finish(image)
     }
 
+    /// Save the capture to the save directory, then hand it to the front
+    /// CLI agent: put PNG + file URL + path on the pasteboard, re-activate
+    /// the previously focused app (the terminal running omp/claude/…), and
+    /// synthesize ⌘V so the shot lands at the prompt. Needs Accessibility
+    /// permission for the synthetic keystroke; without it the pasteboard
+    /// still carries everything so a manual ⌘V works.
+    /// ⌥-click shows a picker of running agent targets (terminals and
+    /// editors); plain click uses the Preferences target or the app that
+    /// was frontmost when the capture started.
+    @objc private func agentClicked(_ sender: NSButton) {
+        let altDown = NSEvent.modifierFlags.contains(.option)
+        if altDown { showAgentTargetMenu(sender); return }
+        let prompt = promptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        agentCommit(prompt: prompt.isEmpty ? nil : prompt)
+    }
+
+    /// Agent path shared by the button and ⏎ in the prompt field:
+    /// annotate via Vision when a prompt exists, save, paste into the
+    /// target, auto-submit.
+    private func agentCommit(prompt: String?, target: NSRunningApplication? = nil) {
+        guard let image = canvasView.renderFinal() else { return }
+        // Annotate synchronously — a region capture is small and the
+        // user just asked for delivery; a 200–400 ms pause is fine.
+        let out = (prompt.map { VisionAnnotator.annotate(image: image, query: $0,
+                                                         bestOnly: true) ?? image }) ?? image
+        let dir = defaultSaveDirectory()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(defaultFileName(ext: "png"))
+        write(out, to: url)
+        EditorWindow.copyForAgent(image: out, fileURL: url)
+        AgentPaste.paste(into: target, prompt: prompt)
+        finish(out)
+    }
+
+    /// Menu of running terminals/editors plus "Auto" — transient choice
+    /// for this paste only; it doesn't touch the Preferences default.
+    private func showAgentTargetMenu(_ anchor: NSButton) {
+        let menu = NSMenu()
+        let auto = NSMenuItem(title: "Auto (last focused app)",
+                              action: #selector(agentTargetPicked(_:)), keyEquivalent: "")
+        auto.target = self
+        auto.representedObject = nil
+        menu.addItem(auto)
+        menu.addItem(.separator())
+        for app in AgentPaste.runningKnownTargets() {
+            let item = NSMenuItem(title: app.localizedName ?? app.bundleIdentifier ?? "?",
+                                  action: #selector(agentTargetPicked(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = app
+            if let id = app.bundleIdentifier {
+                item.state = (id == AgentPaste.preferredTargetID) ? .on : .off
+            }
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4),
+                   in: anchor)
+    }
+
+    @objc private func agentTargetPicked(_ sender: NSMenuItem) {
+        let prompt = promptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        agentCommit(prompt: prompt.isEmpty ? nil : prompt,
+                    target: sender.representedObject as? NSRunningApplication)
+    }
+
+    /// Live OCR hints: debounce typing, run Vision off the main thread,
+    /// show dashed ellipses over matching text as a preview.
+    private var hintWork: DispatchWorkItem?
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard (obj.object as? NSTextField) === promptField else { return }
+        let query = promptField.stringValue
+        hintWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard !query.trimmingCharacters(in: .whitespaces).isEmpty else {
+                DispatchQueue.main.async { self.canvasView.hintRects = [] }
+                return
+            }
+            let rects = VisionAnnotator.matchRects(image: self.shot.image, query: query,
+                                                   bestOnly: true)
+            DispatchQueue.main.async { self.canvasView.hintRects = rects }
+        }
+        hintWork = work
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    @objc private func annotateToggled(_ sender: NSButton) {
+        let on = sender.state == .on
+        annotateRowViews.forEach { $0.isHidden = !on }
+    }
+
+    /// macOS share sheet — Messages, AirDrop, Mail, plus chat apps that
+    /// register a Share extension (Zalo/Messenger appear there when
+    /// their macOS apps are installed).
+    @objc private func shareClicked(_ sender: NSButton) {
+        guard let image = canvasView.renderFinal() else { return }
+        let rep = NSBitmapImageRep(cgImage: image)
+        guard let data = rep.representation(using: .png, properties: [:]),
+              let nsImage = NSImage(data: data) else { return }
+        let picker = NSSharingServicePicker(items: [nsImage])
+        picker.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+    }
+
+    /// ⏎ in the prompt field = Agent with that prompt.
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if let mv = obj.userInfo?["NSTextMovement"] as? Int, mv == NSReturnTextMovement {
+            let prompt = promptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            agentCommit(prompt: prompt.isEmpty ? nil : prompt)
+        }
+    }
+
     /// Writes a PNG representation to the general pasteboard. TIFF is
     /// promised lazily via a provider instead of being encoded eagerly —
     /// the uncompressed TIFF of a full capture was the largest single
@@ -206,6 +397,27 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
         pb.writeObjects([item])
     }
 
+    /// Pasteboard variant for agent handoff: PNG data + promised TIFF +
+    /// file URL + bare POSIX path. Apps that accept image pastes (Orca,
+    /// VSCode chat, Claude Code ⌃V…) take the PNG; terminals fall back
+    /// to the path string. The prompt text is deliberately NOT merged
+    /// into .string — chat boxes prefer text over image and would paste
+    /// the prompt instead of the shot. Prompts go through keystrokes
+    /// after the paste (see AgentPaste).
+    static func copyForAgent(image: CGImage, fileURL: URL) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        let rep = NSBitmapImageRep(cgImage: image)
+        let item = NSPasteboardItem()
+        if let png = rep.representation(using: .png, properties: [:]) {
+            item.setData(png, forType: .png)
+        }
+        item.setDataProvider(PasteboardTIFFProvider(image: image), forTypes: [.tiff])
+        item.setString(fileURL.absoluteString, forType: .fileURL)
+        item.setString(fileURL.path, forType: .string)
+        pb.writeObjects([item])
+    }
+
     @objc private func saveClicked() {
         guard let image = canvasView.renderFinal() else { return }
         let dir = defaultSaveDirectory()
@@ -214,7 +426,11 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
         panel.allowedContentTypes = [.png, .jpeg]
         panel.directoryURL = dir
         panel.nameFieldStringValue = defaultFileName(ext: "png")
+        // The editor floats above panels — drop our level while the
+        // save sheet is up so it isn't hidden behind us.
+        level = .normal
         panel.begin { [weak self] response in
+            self?.level = .floating
             guard response == .OK, let url = panel.url else { return }
             self?.write(image, to: url)
             self?.finish(image)
@@ -347,8 +563,31 @@ final class EditorCanvasView: NSView, NSTextFieldDelegate {
                                  kind: draftKind(rect: r))
             draft.draw(in: ctx)
         }
+
+        // Live OCR hints while the user types in the prompt field —
+        // dashed red ellipses at canvas scale (pixels → points via
+        // shot.scale), preview only, not part of the render.
+        if !hintRects.isEmpty {
+            ctx.saveGState()
+            ctx.setStrokeColor(CGColor(red: 1, green: 0.25, blue: 0.22, alpha: 0.9))
+            ctx.setLineWidth(2.5)
+            ctx.setLineDash(phase: 0, lengths: [6, 4])
+            let s = shot.scale
+            for r in hintRects {
+                let pt = CGRect(x: r.minX / s, y: r.minY / s,
+                                width: r.width / s, height: r.height / s)
+                    .insetBy(dx: -6, dy: -6)
+                ctx.strokeEllipse(in: pt)
+            }
+            ctx.restoreGState()
+        }
     }
 
+
+    /// Pixel-space rects to preview as OCR hint ellipses.
+    var hintRects: [CGRect] = [] {
+        didSet { needsDisplay = true }
+    }
     private func draftKind(rect: CGRect) -> Drawable.ShapeKind {
         guard let s = dragStart else { return .rect(rect) }
         let end = CGPoint(x: rect.maxX, y: rect.maxY)

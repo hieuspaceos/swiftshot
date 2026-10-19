@@ -107,6 +107,19 @@ enum EditorTool: Int, CaseIterable {
         case .text: return "Text"
         }
     }
+
+    /// SF Symbol for the compact icon toolbar.
+    var symbol: String {
+        switch self {
+        case .pen: return "pencil.tip"
+        case .arrow: return "arrow.up.right"
+        case .rect: return "rectangle"
+        case .ellipse: return "circle"
+        case .highlight: return "highlighter"
+        case .mosaic: return "square.grid.3x3.fill"
+        case .text: return "textformat"
+        }
+    }
 }
 
 /// One committed annotation. All coordinates are in "canvas points":

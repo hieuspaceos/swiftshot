@@ -18,6 +18,8 @@ final class PreferencesWindow: NSWindow {
 
 struct PreferencesView: View {
     @State private var saveDir: String = Preferences.saveDirectoryPath()
+    @State private var agentTarget: String = AgentPaste.preferredTargetID ?? ""
+    @State private var runningTargets: [(id: String, name: String)] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -33,6 +35,19 @@ struct PreferencesView: View {
                 Button("Reveal") { revealFolder() }
             }
             HStack {
+                Text("Send to agent:")
+                    .frame(width: 90, alignment: .trailing)
+                Picker("", selection: $agentTarget) {
+                    Text("Auto (last focused app)").tag("")
+                    ForEach(runningTargets, id: \.id) { t in
+                        Text(t.name).tag(t.id)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 220)
+                Spacer()
+            }
+            HStack {
                 Spacer()
                 Text("Launch at login: enable via System Settings → Login Items")
                     .font(.caption)
@@ -41,6 +56,18 @@ struct PreferencesView: View {
         }
         .padding(20)
         .frame(width: 460)
+        .onAppear { refreshTargets() }
+        .onChange(of: agentTarget) { AgentPaste.preferredTargetID = $0.isEmpty ? nil : $0 }
+    }
+
+    private func refreshTargets() {
+        runningTargets = AgentPaste.runningKnownTargets()
+            .compactMap { app -> (String, String)? in
+                guard let id = app.bundleIdentifier,
+                      let name = app.localizedName else { return nil }
+                return (id, name)
+            }
+            .sorted { $0.1 < $1.1 }
     }
 
     private func chooseFolder() {

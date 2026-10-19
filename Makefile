@@ -5,7 +5,7 @@ SRC      := $(wildcard Sources/*.swift)
 SDK      := $(shell xcrun --show-sdk-path)
 TARGET   := arm64-apple-macosx14.0
 
-.PHONY: all clean run
+.PHONY: all clean run install
 
 all: $(BUNDLE)
 
@@ -24,6 +24,12 @@ $(BUNDLE): $(SRC) Info.plist
 
 run: $(BUNDLE)
 	open "$(BUNDLE)"
+
+install: $(BUNDLE)
+	@pkill -x $(APP) 2>/dev/null || true
+	@cp -R "$(BUNDLE)" /Applications/
+	@open "/Applications/$(APP).app"
+	@echo "Installed + relaunched /Applications/$(APP).app"
 
 clean:
 	rm -rf "$(BUILD)"
