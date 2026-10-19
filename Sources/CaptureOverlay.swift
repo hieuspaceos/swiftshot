@@ -206,6 +206,10 @@ final class OverlayContentView: NSView {
                                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return shots.first?.image }
         offscreen.scaleBy(x: scale, y: scale)
+        // Match draw()'s top-left-origin space before calling drawImageUpright:
+        // CGContext(data:) is bottom-up, so flip it here.
+        offscreen.translateBy(x: 0, y: bounds.height)
+        offscreen.scaleBy(x: 1, y: -1)
         for shot in shots {
             drawImageUpright(shot.image, in: viewRect(forScreenFrame: shot.frame), ctx: offscreen)
         }
