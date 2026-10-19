@@ -3,13 +3,74 @@ import CoreGraphics
 
 // MARK: - Screen model
 
-/// A captured screen bitmap. `cgImage` is at native pixel resolution;
-/// `scale` = pixels per screen point; `frame` is the NSScreen-style frame
-/// (bottom-left origin global screen coordinates).
+/// A captured screen bitmap.
+///
+/// Captures arrive as PNG `Data` encoded inside `ScreenCapturer`, so the
+/// raw ~30–70 MB bitmap is released between capture and editor open;
+/// `image` decodes lazily and caches the bitmap until
+/// `releaseDecodedImage()` is called (overlay teardown). `scale` = pixels
+/// per screen point; `frame` is the NSScreen-style frame (bottom-left
+/// origin global screen coordinates).
 struct ScreenShot {
-    let image: CGImage
     let scale: CGFloat
     let frame: CGRect
+    /// Shared by every copy of the struct so the lazy decode happens once.
+    private let bitmap = BitmapHolder()
+
+    init(image: CGImage, scale: CGFloat, frame: CGRect) {
+        self.scale = scale
+        self.frame = frame
+        bitmap.decoded = image
+    }
+
+    init(pngData: Data, scale: CGFloat, frame: CGRect) {
+        self.scale = scale
+        self.frame = frame
+        bitmap.pngData = pngData
+    }
+
+    /// Decoded bitmap (PNG decoded on first access, then cached).
+    var image: CGImage { bitmap.image() }
+
+    /// Drop the decoded bitmap; PNG bytes are retained and a later `image`
+    /// access decodes again.
+    func releaseDecodedImage() { bitmap.release() }
+
+    private final class BitmapHolder {
+        private let lock = NSLock()
+        var decoded: CGImage?
+        var pngData: Data?
+
+        func image() -> CGImage {
+            lock.lock()
+            defer { lock.unlock() }
+            if let decoded { return decoded }
+            if let pngData,
+               let src = CGImageSourceCreateWithData(pngData as CFData, nil),
+               let img = CGImageSourceCreateImageAtIndex(src, 0, nil) {
+                decoded = img
+                return img
+            }
+            // Shouldn't happen — PNG bytes are produced by our own encoder —
+            // but keeps geometry math safe rather than crashing mid-session.
+            return Self.blank
+        }
+
+        func release() {
+            lock.lock()
+            decoded = nil
+            lock.unlock()
+        }
+
+        /// 1×1 transparent fallback for a corrupt-PNG decode failure.
+        private static let blank: CGImage = {
+            let ctx = CGContext(data: nil, width: 1, height: 1,
+                                bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            return ctx.makeImage()!
+        }()
+    }
 }
 
 // MARK: - Coordinate helpers
@@ -55,6 +116,13 @@ struct Drawable {
     var color: NSColor
     var lineWidth: CGFloat
     var kind: ShapeKind
+
+    /// `.mosaic` is the only kind that embeds a bitmap — used to bound
+    /// mosaic entries in the undo stack separately from the overall cap.
+    var isMosaic: Bool {
+        if case .mosaic = kind { return true }
+        return false
+    }
 
     enum ShapeKind {
         case freehand([CGPoint])

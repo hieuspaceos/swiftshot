@@ -12,12 +12,8 @@ final class CaptureOverlayWindow: NSWindow {
     private let overlayView = OverlayContentView()
     private var finished = false
 
-    init(shots: [ScreenShot]) {
-        let union = shots.reduce(CGRect.null) { $0.union($1.frame) }
-        let frame = union.isNull ? (NSScreen.main?.frame ?? .zero) : union
-        overlayView.shots = shots
-        overlayView.unionOrigin = frame.origin
-        super.init(contentRect: frame,
+    private init() {
+        super.init(contentRect: .zero,
                    styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered,
                    defer: false)
@@ -30,10 +26,48 @@ final class CaptureOverlayWindow: NSWindow {
         self.acceptsMouseMovedEvents = true
         overlayView.addTrackingArea(NSTrackingArea(rect: .zero,
             options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: overlayView))
-        overlayView.frame = NSRect(origin: .zero, size: frame.size)
         overlayView.onCommit = { [weak self] r in self?.commit(r) }
         overlayView.onCancel = { [weak self] in self?.cancel() }
         self.contentView = overlayView
+    }
+
+    /// Rebuild the single shared overlay window only when the union of all
+    /// screens changed; otherwise just swap the captured images back in.
+    /// The window is hidden (orderOut) between captures, never dealloc'd.
+    /// `frame` is the union of every screen's frame — supplied by the
+    /// caller because `shots` may start with just the cursor's screen and
+    /// be patched in lazily via `updateShots`.
+    static func shared(frame: CGRect, shots: [ScreenShot]) -> CaptureOverlayWindow {
+        if let existing = _shared {
+            existing.configure(frame: frame, shots: shots)
+            return existing
+        }
+        let window = CaptureOverlayWindow()
+        _shared = window
+        window.configure(frame: frame, shots: shots)
+        return window
+    }
+    private static var _shared: CaptureOverlayWindow?
+
+    /// Shots currently installed on the overlay — grows as async captures
+    /// land; the commit handler crops from this, not a stale snapshot.
+    var currentShots: [ScreenShot] { overlayView.shots }
+
+    /// Swap in additional captures once they arrive (lazy per-screen
+    /// capture). Invalidates the dimmed backdrop cache so the next draw
+    /// recomposites every screen.
+    func updateShots(_ shots: [ScreenShot]) {
+        overlayView.shots = shots
+        overlayView.needsDisplay = true
+    }
+
+    private func configure(frame: CGRect, shots: [ScreenShot]) {
+        if self.frame != frame { setFrame(frame, display: false) }
+        finished = false
+        overlayView.shots = shots
+        overlayView.unionOrigin = frame.origin
+        overlayView.frame = NSRect(origin: .zero, size: frame.size)
+        overlayView.resetSession()
     }
 
     override var canBecomeKey: Bool { true }
@@ -51,6 +85,7 @@ final class CaptureOverlayWindow: NSWindow {
         finished = true
         orderOut(nil)
         onCommit?(rect)
+        overlayView.releaseCaptureMemory()
     }
 
     private func cancel() {
@@ -58,18 +93,35 @@ final class CaptureOverlayWindow: NSWindow {
         finished = true
         orderOut(nil)
         onCancel?()
+        overlayView.releaseCaptureMemory()
     }
 }
 
+
 final class OverlayContentView: NSView {
 
-    var shots: [ScreenShot] = []
+    var shots: [ScreenShot] = [] { didSet { backdropCache = nil } }
     var unionOrigin: CGPoint = .zero
     var onCommit: ((CGRect) -> Void)?
     var onCancel: (() -> Void)?
 
     private var dragStart: CGPoint?   // view coords (bottom-left)
     private var dragCurrent: CGPoint?
+
+    /// Fresh session state for window reuse (clears an ESC'd mid-drag).
+    func resetSession() {
+        dragStart = nil
+        dragCurrent = nil
+        redrawPending = false
+        needsDisplay = true
+    }
+
+    /// Called after commit/cancel: drop the composited backdrop and every
+    /// shot's decoded bitmap — PNG bytes stay, so nothing is lost.
+    func releaseCaptureMemory() {
+        backdropCache = nil
+        for shot in shots { shot.releaseDecodedImage() }
+    }
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -82,9 +134,11 @@ final class OverlayContentView: NSView {
         // Flip to top-left space for image drawing.
         ctx.translateBy(x: 0, y: bounds.height)
         ctx.scaleBy(x: 1, y: -1)
-        for shot in shots {
-            let r = viewRect(forScreenFrame: shot.frame)
-            drawImageUpright(shot.image, in: r, ctx: ctx)
+
+        // Draw the pre-composited dimmed backdrop instead of re-drawing
+        // every screen's full-res CGImage + dim fill on each mouseMoved.
+        if let backdrop = backdropImage() {
+            drawImageUpright(backdrop, in: bounds, ctx: ctx)
         }
 
         // Selection rect in the flipped (top-left) space.
@@ -93,11 +147,6 @@ final class OverlayContentView: NSView {
             CGRect(x: $0.minX, y: bounds.height - $0.maxY,
                    width: $0.width, height: $0.height)
         }
-
-
-        // Dim the whole thing.
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.45).cgColor)
-        ctx.fill(bounds)
 
         if let sel, sel.width > 1, sel.height > 1 {
             // Punch an undimmed hole by re-drawing underlying pixels.
@@ -137,6 +186,35 @@ final class OverlayContentView: NSView {
                      atTopLeft: CGPoint(x: (bounds.width - 300) / 2, y: 40),
                      ctx: ctx, fixedSize: CGSize(width: 300, height: 30), centered: true)
         }
+    }
+
+    /// All screens composited once at HALF backing-pixel resolution with
+    /// the dim fill baked in — the dimmed backdrop is never inspected 1:1,
+    /// so this roughly quarters the offscreen's footprint (~11 MB vs ~23 MB
+    /// on a Retina union). Invalidated when `shots` changes or `bounds` resizes.
+    private var backdropCache: CGImage?
+    private var backdropBounds: CGRect = .zero
+
+    private func backdropImage() -> CGImage? {
+        if let img = backdropCache, backdropBounds == bounds { return img }
+        let scale = (window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2) / 2
+        let w = max(1, Int((bounds.width * scale).rounded()))
+        let h = max(1, Int((bounds.height * scale).rounded()))
+        guard let offscreen = CGContext(data: nil, width: w, height: h,
+                                        bitsPerComponent: 8, bytesPerRow: 0,
+                                        space: CGColorSpaceCreateDeviceRGB(),
+                                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return shots.first?.image }
+        offscreen.scaleBy(x: scale, y: scale)
+        for shot in shots {
+            drawImageUpright(shot.image, in: viewRect(forScreenFrame: shot.frame), ctx: offscreen)
+        }
+        offscreen.setFillColor(NSColor.black.withAlphaComponent(0.45).cgColor)
+        offscreen.fill(bounds)
+        guard let img = offscreen.makeImage() else { return nil }
+        backdropCache = img
+        backdropBounds = bounds
+        return img
     }
 
     /// Mouse position in view coords (bottom-left origin).

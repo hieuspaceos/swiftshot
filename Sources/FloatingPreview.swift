@@ -7,7 +7,10 @@ final class FloatingPreviewPanel: NSPanel {
     var onReopen: ((CGImage) -> Void)?
     var onDismiss: (() -> Void)?
 
-    private let image: CGImage
+    /// Full-res image kept for the reopen path; nil once demoted to JPEG.
+    private var image: CGImage?
+    /// Compact JPEG stand-in used for reopen after demotion.
+    private var demotedJPEG: Data?
     private var fadeTimer: Timer?
 
     init(image: CGImage, scale: CGFloat) {
@@ -110,17 +113,42 @@ final class FloatingPreviewPanel: NSPanel {
         scheduleFade()
     }
 
+    /// Release the full-res CGImage (~30–70 MB on Retina) and keep a JPEG
+    /// for the reopen path. Called when a newer preview supersedes this one.
+    func demoteFullImage() {
+        guard image != nil else { return }
+        if demotedJPEG == nil {
+            demotedJPEG = NSBitmapImageRep(cgImage: image!)
+                .representation(using: .jpeg, properties: [.compressionFactor: 0.85])
+        }
+        image = nil
+    }
+
+    /// Programmatic close — same path as the × button.
+    func dismiss() {
+        fadeTimer?.invalidate()
+        close()
+        onDismiss?()
+    }
+
+    /// Image to reopen in the editor: the full-res CGImage, or the JPEG
+    /// fallback decoded on demand after demotion.
+    private var reopenImage: CGImage? {
+        if let image { return image }
+        guard let data = demotedJPEG,
+              let rep = NSBitmapImageRep(data: data) else { return nil }
+        return rep.cgImage
+    }
+
     private func reopen() {
-        let img = image
+        guard let img = reopenImage else { dismiss(); return }
         close()
         onReopen?(img)
         onDismiss?()
     }
 
     @objc private func closeClicked() {
-        fadeTimer?.invalidate()
-        close()
-        onDismiss?()
+        dismiss()
     }
 }
 

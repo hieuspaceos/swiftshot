@@ -160,10 +160,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func captureRegion() {
         guard ScreenCapturer.checkPermissionOrAlert() else { return }
+        let screens = NSScreen.screens
+        // Lazy per-screen capture: only the display under the cursor is
+        // captured before the overlay appears; the rest arrive via
+        // patchOverlay so hotkey→overlay latency drops on multi-display
+        // setups and uncaptured screens never pay the decode cost.
+        let mouse = NSEvent.mouseLocation
+        let cursorScreen = screens.first(where: { $0.frame.contains(mouse) })
+            ?? NSScreen.main ?? screens.first
+        guard let cursorScreen else {
+            handleCaptureError(CaptureError.noScreens)
+            return
+        }
         Task { [weak self] in
             do {
-                let shots = try await ScreenCapturer.captureAllScreens()
-                await MainActor.run { [weak self] in self?.showOverlay(shots: shots) }
+                let cursorShot = try await ScreenCapturer.captureScreen(cursorScreen)
+                await MainActor.run { [weak self] in
+                    self?.showOverlay(screens: screens, cursorShot: cursorShot)
+                }
+                await self?.patchOverlay(screens: screens, cursorScreen: cursorScreen,
+                                         cursorShot: cursorShot)
             } catch {
                 await MainActor.run { [weak self] in self?.handleCaptureError(error) }
             }
@@ -182,20 +198,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showOverlay(shots: [ScreenShot]) {
-        NSLog("SwiftShot: T1 overlay presenting (\(shots.count) screens)")
-        let overlay = CaptureOverlayWindow(shots: shots)
+    /// Fetch the non-cursor screens after the overlay is already up and
+    /// patch them into the backdrop. Ignored if the session already ended.
+    private func patchOverlay(screens: [NSScreen], cursorScreen: NSScreen,
+                              cursorShot: ScreenShot?) async {
+        let rest = screens.filter { screenDisplayID($0) != screenDisplayID(cursorScreen) }
+        guard !rest.isEmpty else { return }
+        guard let more = try? await ScreenCapturer.captureScreens(rest) else { return }
+        await MainActor.run { [weak self] in
+            guard let overlay = self?.overlay, overlay.isVisible else { return }
+            overlay.updateShots((cursorShot.map { [$0] } ?? []) + more)
+        }
+    }
+
+    private func showOverlay(screens: [NSScreen], cursorShot: ScreenShot?) {
+        NSLog("SwiftShot: T1 overlay presenting (\(screens.count) screens)")
+        // Reuse the single union overlay window across captures — it is only
+        // hidden between sessions, not rebuilt. The union frame comes from
+        // NSScreen geometry so the window is correct even though only the
+        // cursor's screen has been captured so far.
+        let union = screens.reduce(CGRect.null) { $0.union($1.frame) }
+        let frame = union.isNull ? (NSScreen.main?.frame ?? .zero) : union
+        let shots = cursorShot.map { [$0] } ?? []
+        let overlay = CaptureOverlayWindow.shared(frame: frame, shots: shots)
         self.overlay = overlay
-        overlay.onCommit = { [weak self] region in
-            guard let self else { return }
-            self.overlay = nil
-            if let (image, scale) = cropRegion(region, from: shots) {
+        overlay.onCommit = { [weak self, weak overlay] region in
+            guard let self, let overlay else { return }
+            if let (image, scale) = cropRegion(region, from: overlay.currentShots) {
                 self.openEditor(image: image, scale: scale)
             }
         }
-        overlay.onCancel = { [weak self] in
-            self?.overlay = nil
-        }
+        overlay.onCancel = {} // shared window stays alive (hidden) for reuse
         overlay.present()
     }
 
@@ -213,6 +246,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openEditor(image: CGImage, scale: CGFloat) {
         NSLog("SwiftShot: T2 editor opening \(image.width)x\(image.height)")
+        // Editing replaces floating previews — dismiss every panel so none
+        // retains a full-res CGImage (or its demoted JPEG) while the
+        // editor is open.
+        for panel in previews { panel.dismiss() }
         // Copy immediately — the raw capture is on the pasteboard even if the
         // user never touches Copy in the editor.
         EditorWindow.copyToPasteboard(image)
@@ -232,7 +269,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editor.makeKeyAndOrderFront(nil)
     }
 
+    /// Full-res CGImages (~30–70 MB on Retina) are retained only for the
+    /// most recent preview; older ones are demoted to JPEG for reopen, and
+    /// the panel count itself is capped.
+    private let maxPreviews = 5
+
     private func showPreview(image: CGImage, scale: CGFloat) {
+        for panel in previews { panel.demoteFullImage() }
+        while previews.count >= maxPreviews {
+            previews.first?.dismiss()
+        }
         let panel = FloatingPreviewPanel(image: image, scale: scale)
         previews.append(panel)
         panel.onReopen = { [weak self] img in

@@ -178,7 +178,10 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
         finish(image)
     }
 
-    /// Writes PNG + TIFF representations of the image to the general pasteboard.
+    /// Writes a PNG representation to the general pasteboard. TIFF is
+    /// promised lazily via a provider instead of being encoded eagerly —
+    /// the uncompressed TIFF of a full capture was the largest single
+    /// contributor to the editor's ~390 MB peak.
     static func copyToPasteboard(_ image: CGImage) {
         let pb = NSPasteboard.general
         pb.clearContents()
@@ -187,9 +190,7 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
         if let png = rep.representation(using: .png, properties: [:]) {
             item.setData(png, forType: .png)
         }
-        if let tiff = rep.tiffRepresentation {
-            item.setData(tiff, forType: .tiff)
-        }
+        item.setDataProvider(PasteboardTIFFProvider(image: image), forTypes: [.tiff])
         pb.writeObjects([item])
     }
 
@@ -236,6 +237,22 @@ final class EditorWindow: NSWindow, NSWindowDelegate {
     }
 }
 
+/// Encodes TIFF only when a paste target actually requests it.
+private final class PasteboardTIFFProvider: NSObject, NSPasteboardItemDataProvider {
+    private let image: CGImage
+
+    init(image: CGImage) { self.image = image }
+
+    func pasteboard(_ pasteboard: NSPasteboard?,
+                    item: NSPasteboardItem,
+                    provideDataForType type: NSPasteboard.PasteboardType) {
+        guard type == .tiff,
+              let tiff = NSBitmapImageRep(cgImage: image).tiffRepresentation
+        else { return }
+        item.setData(tiff, forType: .tiff)
+    }
+}
+
 // MARK: - Canvas
 
 final class EditorCanvasView: NSView, NSTextFieldDelegate {
@@ -259,9 +276,31 @@ final class EditorCanvasView: NSView, NSTextFieldDelegate {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
-
     override var isOpaque: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+
+    /// Undo is `popLast` on `shapes`; cap the stack so long sessions can't
+    /// grow unbounded. `.mosaic` is the only Drawable that embeds a
+    /// full-scale CGImage, so those are bounded separately at 5 — a
+    /// 20-deep stack of mosaic bitmaps could retain ~400 MB worst case.
+    private let maxUndoableShapes = 20
+    private let maxMosaicShapes = 5
+
+    private func pushShape(_ shape: Drawable) {
+        shapes.append(shape)
+        if shapes.count > maxUndoableShapes {
+            shapes.removeFirst(shapes.count - maxUndoableShapes)
+        }
+        let mosaics = shapes.reduce(0) { $0 + ($1.isMosaic ? 1 : 0) }
+        if mosaics > maxMosaicShapes {
+            var toRemove = mosaics - maxMosaicShapes
+            shapes.removeAll {
+                guard toRemove > 0, $0.isMosaic else { return false }
+                toRemove -= 1 // drops the OLDEST mosaic entries first
+                return true
+            }
+        }
+    }
 
     /// canvas-space point (top-left origin) for an event location.
     private func canvasPoint(_ event: NSEvent) -> CGPoint {
@@ -368,15 +407,15 @@ final class EditorCanvasView: NSView, NSTextFieldDelegate {
         switch currentTool {
         case .pen:
             if let pts = currentPen, pts.count > 1 {
-                shapes.append(Drawable(color: currentColor, lineWidth: currentLineWidth,
-                                       kind: .freehand(pts)))
+                pushShape(Drawable(color: currentColor, lineWidth: currentLineWidth,
+                                   kind: .freehand(pts)))
             }
             currentPen = nil
 
         case .arrow:
             guard s != p else { break }
-            shapes.append(Drawable(color: currentColor, lineWidth: currentLineWidth,
-                                   kind: .line(start: s, end: p, arrowHead: true)))
+            pushShape(Drawable(color: currentColor, lineWidth: currentLineWidth,
+                               kind: .line(start: s, end: p, arrowHead: true)))
 
         case .rect, .ellipse, .highlight, .mosaic:
             let r = CGRect(x: min(s.x, p.x), y: min(s.y, p.y),
@@ -384,15 +423,15 @@ final class EditorCanvasView: NSView, NSTextFieldDelegate {
             guard r.width > 3, r.height > 3 else { break }
             switch currentTool {
             case .rect:
-                shapes.append(Drawable(color: currentColor, lineWidth: currentLineWidth, kind: .rect(r)))
+                pushShape(Drawable(color: currentColor, lineWidth: currentLineWidth, kind: .rect(r)))
             case .ellipse:
-                shapes.append(Drawable(color: currentColor, lineWidth: currentLineWidth, kind: .ellipse(r)))
+                pushShape(Drawable(color: currentColor, lineWidth: currentLineWidth, kind: .ellipse(r)))
             case .highlight:
-                shapes.append(Drawable(color: currentColor, lineWidth: currentLineWidth, kind: .highlight(r)))
+                pushShape(Drawable(color: currentColor, lineWidth: currentLineWidth, kind: .highlight(r)))
             case .mosaic:
                 if let img = pixelateRegion(r, of: shot.image, scale: shot.scale) {
-                    shapes.append(Drawable(color: currentColor, lineWidth: 0,
-                                           kind: .mosaic(rect: r, image: img)))
+                    pushShape(Drawable(color: currentColor, lineWidth: 0,
+                                       kind: .mosaic(rect: r, image: img)))
                 }
             default: break
             }
@@ -461,9 +500,9 @@ final class EditorCanvasView: NSView, NSTextFieldDelegate {
             .font: NSFont.systemFont(ofSize: max(14, currentLineWidth * 5), weight: .medium),
             .foregroundColor: currentColor
         ]
-        shapes.append(Drawable(color: currentColor, lineWidth: currentLineWidth,
-                               kind: .text(origin: origin,
-                                           string: NSAttributedString(string: str, attributes: attrs))))
+        pushShape(Drawable(color: currentColor, lineWidth: currentLineWidth,
+                           kind: .text(origin: origin,
+                                       string: NSAttributedString(string: str, attributes: attrs))))
         needsDisplay = true
     }
 
