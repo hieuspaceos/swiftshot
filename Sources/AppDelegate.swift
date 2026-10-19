@@ -100,6 +100,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func captureRegionMenu() { captureRegion() }
     @objc private func captureFullscreenMenu() { captureFullscreen() }
+    @objc private func openDonate() {
+        NSWorkspace.shared.open(URL(string: "https://ko-fi.com/hieuspaceos")!)
+    }
     @objc private func quitApp() { NSApp.terminate(nil) }
 
     @objc private func toggleDesktopIcons() {
