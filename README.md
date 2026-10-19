@@ -31,7 +31,18 @@ No third-party dependencies.
 Registered globally via Carbon `RegisterEventHotKey` — no Accessibility
 permission needed.
 
-## Build & Run
+## Install
+
+Prebuilt app (arm64, macOS 14+):
+
+1. Download **SwiftShot.zip** from the
+   [latest release](https://github.com/hieuspaceos/swiftshot/releases/latest).
+2. Unzip and drag `SwiftShot.app` into `/Applications`.
+3. The app is ad-hoc signed — if Gatekeeper blocks it, right-click → Open,
+   or run `xattr -dr com.apple.quarantine /Applications/SwiftShot.app`.
+4. Launch; grant **Screen Recording** on first capture when prompted.
+
+## Build from source
 
 ```sh
 make            # builds Build/SwiftShot.app
