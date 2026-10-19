@@ -22,22 +22,41 @@ brew install --cask swiftshot
 - **Capture Region** — fullscreen dimmed overlay across all displays; drag a
   rubber-band selection, click inside it or press **⏎** to confirm, **⎋** to cancel.
 - **Capture Fullscreen** — captures every connected display as one image.
-- **Editor** — annotate before saving:
-  - Pen (freehand), Arrow, Rectangle, Ellipse, translucent Highlight,
-    Mosaic (pixelate region), Text (click to place, type, Enter/click to commit).
-  - 7 preset colors, stroke-width slider, Undo (⌘Z), Cancel (⎋).
-- **Agent button** — saves the PNG to the save folder, puts image + file
-  URL + path on the clipboard, returns focus to the app that was
-  frontmost at capture time (or a chosen target: Terminal, iTerm2,
-  Ghostty, Warp, VSCode, Cursor — set in Preferences), and synthesizes
-  ⌘V so the shot lands at the prompt. Built for CLI agents
-  (omp/claude/codex): terminals get the file path, editors get the image.
-- **Floating preview** — after Copy/Save a thumbnail panel pins to the
+- **Agent Pill** — after every capture a floating prompt pill appears at
+  the cursor: type what the shot is about ("nút Login bị lỗi"), hit **⏎**
+  → Vision OCR circles the matching text in the shot → image + prompt
+  are pasted into your agent app and auto-submitted. No editor, no
+  manual annotate — screenshot becomes a message.
+- **Vision auto-annotate** — on-device OCR (`VNRecognizeTextRequest`)
+  finds the term you typed and draws a red ellipse around it:
+  - one circle per term — "phone" → single spot, "input phone and city"
+    → a circle on each
+  - ordinal: **"login 2"** circles the 2nd "login" (top→bottom,
+    left→right)
+  - quoted phrases: `"billing information"` matches the whole phrase
+  - works fully offline, no Apple Intelligence/Siri needed
+- **Editor** — floating HUD (borderless panel, no chrome):
+  - Single-row toolbar: Copy / Save / Send-to-agent / Share icons,
+    drawing tools (Pen, Arrow, Rect, Ellipse, Highlight, Mosaic, Text),
+    7 colors, stroke slider, Undo — all visible at once
+  - Inline prompt field with **live OCR preview**: dashed ellipse
+    appears over the matching text as you type; ⏎ = annotate + send
+  - Share button → macOS share sheet (Messages, AirDrop, Mail, and
+    any chat app with a Share extension — Zalo/Messenger included)
+- **Agent delivery** — paste lands where your agent lives:
+  - Auto = app that was frontmost at capture, or pick a fixed target
+    in Preferences / ⌥-click for a one-off choice (Terminal, iTerm2,
+    Ghostty, Warp, VSCode, Cursor, Orca)
+  - Image-capable targets get the real PNG; plain terminals get the
+    file path; the prompt is typed as a second paste (Unicode-safe,
+    Vietnamese diacritics intact) then ⏎ submits
+- **Floating preview** — after delivery a thumbnail panel pins to the
   bottom-right corner; click to reopen the editor, × to dismiss,
   auto-fades after ~10 s (hover restores).
 - **Hide Desktop Icons** — toggles `com.apple.finder CreateDesktop` and
   restarts Finder; menu item shows a checkmark while hidden.
-- **Open Save Folder** / **Preferences…** (choose save folder) / **Quit**.
+- **Open Save Folder** / **Preferences…** (save folder + agent target)
+  / **Quit**.
 
 ## Hotkeys
 
@@ -65,6 +84,7 @@ Prebuilt app (arm64, macOS 14+):
 ```sh
 make            # builds Build/SwiftShot.app
 make run        # build + open
+make install    # build + copy to /Applications + relaunch
 make clean
 ```
 
@@ -90,10 +110,9 @@ macOS must grant permission; SwiftShot preflights with
 *System Settings → Privacy & Security → Screen Recording*. Enable SwiftShot
 there (quit & relaunch if prompted).
 
-**Accessibility** is used only by the **Agent** button's auto-⌘V (posting
-the keystroke into your terminal). macOS prompts on first use; without it
-the Agent button still saves the file and fills the clipboard — you paste
-manually.
+**Accessibility** is used by agent delivery (⌘V + typed prompt + ⏎ into
+your terminal). macOS prompts on first use; without it the Agent path
+still saves the file and fills the clipboard — you paste manually.
 
 ## Default save location
 
@@ -105,7 +124,9 @@ Changeable in Preferences.
 - Region selection commits on click-inside or Enter (CleanShot-style
   "click to confirm" after dragging).
 - Launch-at-login is not bundled; enable via System Settings → Login Items.
-- No screen recording/GIF, scrolling capture, OCR, or cloud upload.
+- No screen recording/GIF, scrolling capture, or cloud upload.
+- OCR annotate matches *text visible in the shot* — it finds words, not
+  meaning ("the broken button" won't resolve which button is broken).
 ## Security & trust
 
 - **Open source** — every byte of the release binary is produced from the

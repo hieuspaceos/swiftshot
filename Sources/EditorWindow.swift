@@ -14,11 +14,8 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
     private var toolButtons: [NSButton] = []
     private var colorButtons: [NSButton] = []
     private var finished = false
-    /// Row-1 extras: inline prompt field + Annotate toggle; row-2 views
-    /// are hidden until the toggle is on.
+    /// Row-1 prompt field for agent questions.
     private let promptField = NSTextField()
-    private let annotateToggle = NSButton()
-    private var annotateRowViews: [NSView] = []
 
     static let palette: [NSColor] = [
         .systemRed, .systemYellow, .systemGreen, .systemBlue,
@@ -32,7 +29,7 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
         canvasView = EditorCanvasView(shot: shot)
 
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let toolbarH: CGFloat = 80
+        let toolbarH: CGFloat = 44
         let maxW = screen.width - 60, maxH = screen.height - toolbarH - 60
         let winW = min(max(canvasSize.width + 2, 720), maxW)
         let winH = min(canvasSize.height + 2 + toolbarH, maxH + toolbarH)
@@ -81,96 +78,61 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
     // MARK: - Toolbar
 
     private func buildToolbar(in contentView: NSView, canvasSize: NSSize) {
-        // Two-row toolbar:
-        //   Row 1 (always):  Copy  Save  Agent  Share  [prompt field]  Annotate  Cancel
-        //   Row 2 (Annotate toggled on): drawing tools + colors + width + Undo
-        // Agent-era default: the screenshot's destination is a
-        // conversation, not an annotation canvas — drawing tools stay
-        // hidden until asked for.
-        let scrollHost = NSScrollView(frame: NSRect(x: 0, y: contentView.bounds.height - 80,
-                                                    width: contentView.bounds.width, height: 80))
-        scrollHost.autoresizingMask = [.width, .minYMargin]
-        scrollHost.hasHorizontalScroller = true
-        scrollHost.hasVerticalScroller = false
-        scrollHost.autohidesScrollers = true
-        scrollHost.horizontalScrollElasticity = .none
-        scrollHost.drawsBackground = false
-        let toolbar = NSView(frame: NSRect(x: 0, y: 0, width: contentView.bounds.width, height: 80))
-        // Solid capsule: hudWindow vibrancy washed out over dark
-        // captures, so use a dark rounded fill with a faint border.
-        let capsule = NSView(frame: NSRect(x: 8, y: 38,
-                                           width: contentView.bounds.width - 16, height: 36))
+        // Single-row toolbar, everything visible at once:
+        //   actions | tools | colors | width | undo | prompt | cancel
+        // Compact 30-pt icon buttons; the prompt pill flexes with width.
+        let barH: CGFloat = 44
+        let toolbar = NSView(frame: NSRect(x: 0, y: 0,
+                                           width: contentView.bounds.width, height: barH))
+        toolbar.autoresizingMask = [.width]
+
+        // Dark capsule background — vibrancy washed out over captures.
+        let capsule = NSView(frame: NSRect(x: 4, y: 4,
+                                           width: contentView.bounds.width - 8, height: barH - 8))
         capsule.autoresizingMask = [.width]
         capsule.wantsLayer = true
-        capsule.layer?.cornerRadius = 18
+        capsule.layer?.cornerRadius = (barH - 8) / 2
         capsule.layer?.backgroundColor = NSColor(white: 0.16, alpha: 0.95).cgColor
         capsule.layer?.borderWidth = 0.5
         capsule.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
         toolbar.addSubview(capsule)
 
-        var x: CGFloat = 20
-        let topY: CGFloat = 42 // icon row inside the capsule
+        var x: CGFloat = 16
+        let iy: CGFloat = (barH - 28) / 2
 
-        // — Row 1: icon actions —
+        // — Actions —
         let specs: [(String, String, Selector)] = [
             ("doc.on.doc", "Copy", #selector(copyClicked)),
             ("square.and.arrow.down", "Save…", #selector(saveClicked)),
             ("paperplane.fill", "Send to agent (⌥-click: choose app)", #selector(agentClicked)),
             ("square.and.arrow.up", "Share…", #selector(shareClicked)),
-            ("xmark", "Cancel", #selector(cancelClicked)),
         ]
         for (symbol, tip, sel) in specs {
             let b = iconButton(symbol, tip: tip, action: sel,
-                               frame: NSRect(x: x, y: topY - 2, width: 36, height: 28))
+                               frame: NSRect(x: x, y: iy, width: 30, height: 28))
             if symbol == "paperplane.fill" {
                 b.sendAction(on: [.leftMouseDown, .rightMouseDown])
             }
             toolbar.addSubview(b)
-            x += 40
+            x += 32
         }
 
-        // Inline prompt pill: type here, ⏎ = Agent (annotate + send).
-        promptField.frame = NSRect(x: x + 6, y: topY, width: 240, height: 26)
-        promptField.placeholderString = "Ask about this shot…  ⏎ sends"
-        promptField.bezelStyle = .roundedBezel
-        promptField.font = .systemFont(ofSize: 12)
-        promptField.delegate = self
-        toolbar.addSubview(promptField)
-        x += 252
-
-        // Annotate toggle reveals row 2.
-        annotateToggle.setButtonType(.onOff)
-        annotateToggle.title = " Annotate"
-        annotateToggle.image = NSImage(systemSymbolName: "pencil.tip.crop.circle",
-                                       accessibilityDescription: "Annotate")
-        annotateToggle.imagePosition = .imageLeading
-        annotateToggle.bezelStyle = .rounded
-        annotateToggle.controlSize = .small
-        annotateToggle.target = self
-        annotateToggle.action = #selector(annotateToggled(_:))
-        annotateToggle.frame = NSRect(x: x + 4, y: topY, width: 98, height: 26)
-        toolbar.addSubview(annotateToggle)
-        x += 108
-
-        // — Row 2: drawing tools, hidden until Annotate is on —
-        var tx: CGFloat = 10
-        let botY: CGFloat = 6
-
+        x += 8
+        // — Drawing tools, always visible —
         for tool in EditorTool.allCases {
             let b = iconButton(tool.symbol, tip: tool.title,
                                action: #selector(toolClicked(_:)),
-                               frame: NSRect(x: tx, y: botY, width: 34, height: 28))
+                               frame: NSRect(x: x, y: iy, width: 30, height: 28))
             b.tag = tool.rawValue
-            // Momentary icon button; selected state is driven manually
-            // in toolClicked so taps always fire the action.
             toolbar.addSubview(b)
             toolButtons.append(b)
-            tx += 38
+            x += 32
         }
 
-        tx += 8
+        x += 8
+        // — Colors —
         for color in EditorWindow.palette {
-            let b = NSButton(frame: NSRect(x: tx, y: botY + 4, width: 20, height: 20))
+            let b = NSButton(frame: NSRect(x: x, y: iy + 4, width: 20, height: 20))
             b.wantsLayer = true
             b.layer?.backgroundColor = color.cgColor
             b.layer?.cornerRadius = 10
@@ -183,37 +145,54 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
             b.identifier = NSUserInterfaceItemIdentifier("\(EditorWindow.palette.firstIndex(of: color)!)")
             toolbar.addSubview(b)
             colorButtons.append(b)
-            tx += 26
+            x += 24
         }
         updateColorSelection()
 
-        tx += 8
+        x += 6
         let slider = NSSlider(value: 3, minValue: 1, maxValue: 14,
                               target: self, action: #selector(widthChanged(_:)))
-        slider.frame = NSRect(x: tx, y: botY + 4, width: 90, height: 20)
+        slider.frame = NSRect(x: x, y: iy + 4, width: 70, height: 20)
         toolbar.addSubview(slider)
-        tx += 98
+        x += 76
 
-        let undo = NSButton(title: "Undo", target: self, action: #selector(undoClicked))
-        undo.bezelStyle = .rounded
-        undo.controlSize = .small
-        undo.frame = NSRect(x: tx, y: botY, width: 50, height: 28)
+        let undo = NSButton(image: NSImage(systemSymbolName: "arrow.uturn.backward",
+                                           accessibilityDescription: "Undo")!,
+                            target: self, action: #selector(undoClicked))
+        undo.isBordered = false
+        undo.toolTip = "Undo"
+        undo.contentTintColor = .white
+        undo.frame = NSRect(x: x, y: iy, width: 30, height: 28)
         toolbar.addSubview(undo)
-        tx += 58
+        x += 36
 
-        // Hide row 2 until Annotate is toggled.
-        let row2 = toolButtons + colorButtons + [slider, undo]
-        annotateRowViews = row2
-        row2.forEach { $0.isHidden = true }
+        // — Prompt pill + Cancel on the trailing edge —
+        let cancel = iconButton("xmark", tip: "Cancel", action: #selector(cancelClicked),
+                                frame: .zero)
+        toolbar.addSubview(cancel)
+        promptField.placeholderString = "Ask about this shot…  ⏎ sends"
+        promptField.bezelStyle = .roundedBezel
+        promptField.font = .systemFont(ofSize: 12)
+        promptField.delegate = self
+        toolbar.addSubview(promptField)
 
-        toolbar.frame.size.width = max(max(x, tx), contentView.bounds.width)
-        scrollHost.documentView = toolbar
-        contentView.addSubview(scrollHost)
+        // Layout prompt+cancel responsively once the bar knows its width.
+        let layout = { [weak self] in
+            guard let self else { return }
+            let w = toolbar.bounds.width
+            let cancelX = w - 36
+            cancel.frame = NSRect(x: cancelX, y: iy, width: 30, height: 28)
+            let promptW = max(120, cancelX - x - 14)
+            self.promptField.frame = NSRect(x: x + 6, y: iy - 1, width: promptW, height: 26)
+        }
+        layout()
+
+        contentView.addSubview(toolbar)
 
         // Canvas inside scroll view below the toolbar.
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0,
                                                 width: contentView.bounds.width,
-                                                height: contentView.bounds.height - 80))
+                                                height: contentView.bounds.height - barH))
         scroll.autoresizingMask = [.width, .height]
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
@@ -239,10 +218,6 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
     @objc private func toolClicked(_ sender: NSButton) {
         canvasView.currentTool = EditorTool(rawValue: sender.tag) ?? .pen
         for b in toolButtons { b.state = (b == sender) ? .on : .off }
-        // Picking a tool implies intent to draw — reveal the row and
-        // make Annotate reflect it.
-        if annotateToggle.state != .on { annotateToggle.state = .on }
-        annotateRowViews.forEach { $0.isHidden = false }
     }
 
     @objc private func colorClicked(_ sender: NSButton) {
@@ -356,10 +331,6 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.18, execute: work)
     }
 
-    @objc private func annotateToggled(_ sender: NSButton) {
-        let on = sender.state == .on
-        annotateRowViews.forEach { $0.isHidden = !on }
-    }
 
     /// macOS share sheet — Messages, AirDrop, Mail, plus chat apps that
     /// register a Share extension (Zalo/Messenger appear there when
