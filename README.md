@@ -15,7 +15,7 @@ brew install --cask swiftshot
 
 **Manual** — grab the DMG from
 [Releases](https://github.com/hieuspaceos/swiftshot/releases/latest), drag into
-/Applications, right-click → Open once (ad-hoc signed).
+/Applications and open (Developer ID signed + notarized).
 
 ## Features
 
@@ -75,9 +75,7 @@ Prebuilt app (arm64, macOS 14+):
 1. Download **SwiftShot.zip** from the
    [latest release](https://github.com/hieuspaceos/swiftshot/releases/latest).
 2. Unzip and drag `SwiftShot.app` into `/Applications`.
-3. The app is ad-hoc signed — if Gatekeeper blocks it, right-click → Open,
-   or run `xattr -dr com.apple.quarantine /Applications/SwiftShot.app`.
-4. Launch; grant **Screen Recording** on first capture when prompted.
+3. Launch; grant **Screen Recording** on first capture when prompted.
 
 ## Build from source
 
@@ -140,9 +138,8 @@ Changeable in Preferences.
   offline; nothing leaves your Mac.
 - **Permissions** — SwiftShot asks for Screen Recording (System Settings → Privacy & Security → Screen Recording)
   and nothing else.
-- **Ad-hoc signed** — not yet notarized (needs a paid Apple Developer
-  account). On first launch macOS shows "cannot be opened because the
-  developer cannot be verified" — right-click → **Open** once, then it
-  runs normally forever after.
+- **Signed & notarized** — release builds are signed with a Developer ID
+  certificate and notarized by Apple; macOS opens them with no Gatekeeper
+  warning.
 - **Prefer building yourself?** `git clone`, `make`, `make run` —
   no external dependencies, readable in one sitting.
