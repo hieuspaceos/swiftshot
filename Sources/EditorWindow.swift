@@ -50,18 +50,23 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
         self.isMovableByWindowBackground = true
         self.delegate = self
 
+        // Round the whole HUD window — contentView layer clips corners.
+        self.contentView?.wantsLayer = true
+        self.contentView?.layer?.cornerRadius = 14
+        self.contentView?.layer?.masksToBounds = true
+        self.contentView?.layer?.backgroundColor = NSColor(white: 0.16, alpha: 0.97).cgColor
+
         buildToolbar(in: self.contentView!, canvasSize: canvasSize)
 
         canvasView.onCancel = { [weak self] in self?.finish(nil) }
         canvasView.needsDisplay = true
     }
 
-    /// Compact icon button for the HUD toolbar.
+    /// Compact icon button for the HUD toolbar — dark, rounded, with a
+    /// visible hover/press highlight.
     private func iconButton(_ symbol: String, tip: String, action: Selector,
                             frame: NSRect) -> NSButton {
-        let b = NSButton(frame: frame)
-        b.bezelStyle = .regularSquare
-        b.isBordered = false
+        let b = HUDIconButton(frame: frame)
         b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
         b.imagePosition = .imageOnly
         b.contentTintColor = .white
@@ -71,6 +76,46 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
         return b
     }
 
+    /// Icon button with subtle rounded highlight on hover/press so clicks
+    /// read as a press, not a no-op.
+    private final class HUDIconButton: NSButton {
+        private var tracking: NSTrackingArea?
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            bezelStyle = .regularSquare
+            isBordered = false
+            wantsLayer = true
+            layer?.cornerRadius = 7
+            layer?.backgroundColor = NSColor.clear.cgColor
+        }
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let t = tracking { removeTrackingArea(t) }
+            let t = NSTrackingArea(rect: bounds,
+                                   options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                   owner: self)
+            addTrackingArea(t)
+            tracking = t
+        }
+        override func mouseEntered(with event: NSEvent) {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
+        }
+        override func mouseExited(with event: NSEvent) {
+            layer?.backgroundColor = NSColor.clear.cgColor
+        }
+        override func mouseDown(with event: NSEvent) {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.26).cgColor
+            super.mouseDown(with: event)
+        }
+        override func mouseUp(with event: NSEvent) {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
+            super.mouseUp(with: event)
+        }
+    }
+
     // Borderless panels can't become key by default — without this the
     // prompt field never receives keyboard focus.
     override var canBecomeKey: Bool { true }
@@ -78,27 +123,24 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
     // MARK: - Toolbar
 
     private func buildToolbar(in contentView: NSView, canvasSize: NSSize) {
-        // Single-row toolbar, everything visible at once:
-        //   actions | tools | colors | width | undo | prompt | cancel
-        // Compact 30-pt icon buttons; the prompt pill flexes with width.
-        let barH: CGFloat = 44
+        // Single-row HUD: prompt first (compact), then actions | tools |
+        // color-dot | width | undo | cancel.
+        let barH: CGFloat = 48
         let toolbar = NSView(frame: NSRect(x: 0, y: 0,
                                            width: contentView.bounds.width, height: barH))
         toolbar.autoresizingMask = [.width]
 
-        // Dark capsule background — vibrancy washed out over captures.
-        let capsule = NSView(frame: NSRect(x: 4, y: 4,
-                                           width: contentView.bounds.width - 8, height: barH - 8))
-        capsule.autoresizingMask = [.width]
-        capsule.wantsLayer = true
-        capsule.layer?.cornerRadius = (barH - 8) / 2
-        capsule.layer?.backgroundColor = NSColor(white: 0.16, alpha: 0.95).cgColor
-        capsule.layer?.borderWidth = 0.5
-        capsule.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
-        toolbar.addSubview(capsule)
-
-        var x: CGFloat = 16
+        var x: CGFloat = 12
         let iy: CGFloat = (barH - 28) / 2
+
+        // — Prompt first, compact —
+        promptField.placeholderString = "Ask…  ⏎ sends"
+        promptField.bezelStyle = .roundedBezel
+        promptField.font = .systemFont(ofSize: 12)
+        promptField.delegate = self
+        promptField.frame = NSRect(x: x, y: iy + 1, width: 160, height: 26)
+        toolbar.addSubview(promptField)
+        x += 168
 
         // — Actions —
         let specs: [(String, String, Selector)] = [
@@ -117,8 +159,8 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
             x += 32
         }
 
-        x += 8
-        // — Drawing tools, always visible —
+        x += 6
+        // — Drawing tools —
         for tool in EditorTool.allCases {
             let b = iconButton(tool.symbol, tip: tool.title,
                                action: #selector(toolClicked(_:)),
@@ -129,68 +171,48 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
             x += 32
         }
 
-        x += 8
-        // — Colors —
-        for color in EditorWindow.palette {
-            let b = NSButton(frame: NSRect(x: x, y: iy + 4, width: 20, height: 20))
-            b.wantsLayer = true
-            b.layer?.backgroundColor = color.cgColor
-            b.layer?.cornerRadius = 10
-            b.layer?.borderWidth = 0
-            b.bezelStyle = .regularSquare
-            b.isBordered = false
-            b.title = ""
-            b.target = self
-            b.action = #selector(colorClicked(_:))
-            b.identifier = NSUserInterfaceItemIdentifier("\(EditorWindow.palette.firstIndex(of: color)!)")
-            toolbar.addSubview(b)
-            colorButtons.append(b)
-            x += 24
-        }
-        updateColorSelection()
-
         x += 6
+        // — Color dot —
+        colorChip.frame = NSRect(x: x, y: iy + 2, width: 24, height: 24)
+        colorChip.wantsLayer = true
+        colorChip.layer?.cornerRadius = 12
+        colorChip.layer?.borderWidth = 2
+        colorChip.layer?.borderColor = NSColor.white.withAlphaComponent(0.7).cgColor
+        colorChip.layer?.backgroundColor = canvasView.currentColor.cgColor
+        colorChip.title = ""
+        colorChip.bezelStyle = .inline
+        colorChip.isBordered = false
+        colorChip.toolTip = "Stroke color"
+        colorChip.setAccessibilityLabel("Stroke color")
+        colorChip.target = self
+        colorChip.action = #selector(colorChipClicked(_:))
+        toolbar.addSubview(colorChip)
+        x += 30
+
         let slider = NSSlider(value: 3, minValue: 1, maxValue: 14,
                               target: self, action: #selector(widthChanged(_:)))
-        slider.frame = NSRect(x: x, y: iy + 4, width: 70, height: 20)
+        slider.frame = NSRect(x: x, y: iy + 4, width: 64, height: 20)
+        slider.toolTip = "Stroke width"
         toolbar.addSubview(slider)
-        x += 76
+        x += 70
 
-        let undo = NSButton(image: NSImage(systemSymbolName: "arrow.uturn.backward",
-                                           accessibilityDescription: "Undo")!,
-                            target: self, action: #selector(undoClicked))
-        undo.isBordered = false
-        undo.toolTip = "Undo"
-        undo.contentTintColor = .white
-        undo.frame = NSRect(x: x, y: iy, width: 30, height: 28)
+        // — Undo —
+        let undo = iconButton("arrow.uturn.backward", tip: "Undo",
+                              action: #selector(undoClicked),
+                              frame: NSRect(x: x, y: iy, width: 30, height: 28))
         toolbar.addSubview(undo)
-        x += 36
 
-        // — Prompt pill + Cancel on the trailing edge —
         let cancel = iconButton("xmark", tip: "Cancel", action: #selector(cancelClicked),
-                                frame: .zero)
+                                frame: NSRect(x: toolbar.bounds.width - 40, y: iy,
+                                              width: 30, height: 28))
+        cancel.autoresizingMask = [.minXMargin]
         toolbar.addSubview(cancel)
-        promptField.placeholderString = "Ask about this shot…  ⏎ sends"
-        promptField.bezelStyle = .roundedBezel
-        promptField.font = .systemFont(ofSize: 12)
-        promptField.delegate = self
-        toolbar.addSubview(promptField)
-
-        // Layout prompt+cancel responsively once the bar knows its width.
-        let layout = { [weak self] in
-            guard let self else { return }
-            let w = toolbar.bounds.width
-            let cancelX = w - 36
-            cancel.frame = NSRect(x: cancelX, y: iy, width: 30, height: 28)
-            let promptW = max(120, cancelX - x - 14)
-            self.promptField.frame = NSRect(x: x + 6, y: iy - 1, width: promptW, height: 26)
-        }
-        layout()
 
         contentView.addSubview(toolbar)
 
-        // Canvas inside scroll view below the toolbar.
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0,
+        // Canvas scroll view occupies the top area; the toolbar row sits
+        // BELOW it (bottom-mounted HUD).
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: barH,
                                                 width: contentView.bounds.width,
                                                 height: contentView.bounds.height - barH))
         scroll.autoresizingMask = [.width, .height]
@@ -200,17 +222,49 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
         scroll.backgroundColor = NSColor(white: 0.12, alpha: 1)
         canvasView.frame = NSRect(origin: .zero, size: canvasSize)
         scroll.documentView = canvasView
-        contentView.addSubview(scroll, positioned: .below, relativeTo: toolbar)
+        contentView.addSubview(scroll)
+    }
+
+    /// Color swatch chip — click pops a dropdown of palette colors.
+    private let colorChip = NSButton()
+
+    @objc private func colorChipClicked(_ sender: NSButton) {
+        let menu = NSMenu()
+        for (i, color) in EditorWindow.palette.enumerated() {
+            let item = NSMenuItem(title: colorName(i),
+                                  action: #selector(colorMenuPicked(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.tag = i
+            // Big swatch + name so colors read clearly.
+            let swatch = NSImage(size: NSSize(width: 24, height: 24))
+            swatch.lockFocus()
+            color.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 1, y: 1, width: 22, height: 22),
+                         xRadius: 11, yRadius: 11).fill()
+            NSColor.white.withAlphaComponent(0.6).setStroke()
+            NSBezierPath(roundedRect: NSRect(x: 1.5, y: 1.5, width: 21, height: 21),
+                         xRadius: 10.5, yRadius: 10.5).stroke()
+            swatch.unlockFocus()
+            item.image = swatch
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil,
+                   at: NSPoint(x: 0, y: sender.bounds.height + 4),
+                   in: sender)
+    }
+
+    @objc private func colorMenuPicked(_ sender: NSMenuItem) {
+        canvasView.currentColor = EditorWindow.palette[sender.tag]
+        colorChip.layer?.backgroundColor = canvasView.currentColor.cgColor
+    }
+
+    private func colorName(_ i: Int) -> String {
+        ["Red", "Yellow", "Green", "Blue", "Purple", "White", "Black"][i]
     }
 
     private func updateColorSelection() {
-        for (i, b) in colorButtons.enumerated() {
-            let selected = canvasView.currentColor == EditorWindow.palette[i]
-            b.layer?.borderWidth = selected ? 2.5 : 1
-            b.layer?.borderColor = selected
-                ? NSColor.white.cgColor
-                : NSColor.black.withAlphaComponent(0.4).cgColor
-        }
+        colorChip.layer?.backgroundColor = canvasView.currentColor.cgColor
     }
 
     // MARK: - Actions
@@ -220,11 +274,6 @@ final class EditorWindow: NSWindow, NSWindowDelegate, NSTextFieldDelegate {
         for b in toolButtons { b.state = (b == sender) ? .on : .off }
     }
 
-    @objc private func colorClicked(_ sender: NSButton) {
-        let i = Int(sender.identifier?.rawValue ?? "0") ?? 0
-        canvasView.currentColor = EditorWindow.palette[min(max(i, 0), EditorWindow.palette.count - 1)]
-        updateColorSelection()
-    }
 
     @objc private func widthChanged(_ sender: NSSlider) {
         canvasView.currentLineWidth = CGFloat(sender.doubleValue)
